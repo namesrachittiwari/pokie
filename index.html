@@ -115,32 +115,6 @@ button:focus-visible, input:focus-visible { outline:2px solid var(--pink); outli
 .bar-track { height:4px; border-radius:2px; background:var(--elev); overflow:hidden; }
 .bar-track i { display:block; height:100%; }
 
-/* ============ Welcome ============ */
-.welcome { min-height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:44px; padding:60px 56px; }
-.welcome-head { display:flex; flex-direction:column; align-items:center; gap:18px; text-align:center; max-width:640px; }
-.welcome-eyebrow { font-size:13px; letter-spacing:1.5px; text-transform:uppercase; color:var(--pink); font-weight:600; }
-.welcome h1 { font-size:56px; font-weight:600; line-height:1.06; letter-spacing:-2px; }
-.welcome-sub { font-size:18px; color:var(--t2); line-height:1.6; max-width:480px; text-wrap:pretty; }
-.dropzone {
-  width:100%; max-width:520px;
-  border:1.5px dashed rgba(235,107,168,.45); border-radius:36px;
-  background:var(--panel); padding:52px 40px;
-  display:flex; flex-direction:column; align-items:center; gap:14px;
-  text-align:center; cursor:pointer;
-  transition:border-color .25s ease, background .25s ease;
-}
-.dropzone:hover { border-color:var(--pink); background:#101010; }
-.dropzone .up { width:52px; height:52px; border-radius:18px; background:rgba(235,107,168,.14); color:var(--pink); display:flex; align-items:center; justify-content:center; font-size:22px; }
-.dropzone .t { font-size:20px; font-weight:600; }
-.dropzone .s { font-size:14px; color:var(--t3); }
-.dropzone .s b { color:var(--pink); font-weight:400; cursor:pointer; }
-.journey { display:flex; align-items:center; padding-top:6px; }
-.j-rail { width:64px; height:1px; margin:0 14px; }
-.j-step { display:flex; align-items:center; gap:9px; }
-.j-dot { width:10px; height:10px; border-radius:50%; }
-.j-lb { font-size:13px; font-weight:500; white-space:nowrap; }
-.footnote { font-size:13px; color:var(--t3); }
-
 /* ============ Chat (home) ============ */
 .chat-shell { height:100%; display:flex; flex-direction:column; }
 .chat-top { flex-shrink:0; display:flex; align-items:center; justify-content:space-between; padding:18px 40px; }
@@ -476,9 +450,6 @@ button:focus-visible, input:focus-visible { outline:2px solid var(--pink); outli
   .tab .ic { font-size:17px; }
   .tab.on { color:#fff; }
   .tab .dot { position:absolute; top:2px; right:calc(50% - 16px); width:6px; height:6px; border-radius:50%; }
-  .welcome h1 { font-size:38px; letter-spacing:-1.2px; }
-  .welcome { padding:40px 20px; gap:32px; }
-  .journey { transform:scale(.85); }
   .onboard { grid-template-columns:1fr; }
   .ob-side { display:none; }
   .chat-top, .chat-centre, .chat-foot, .thread-scroll, .thread-composer, .ob-head, .ob-scroll, .ob-composer { padding-left:18px; padding-right:18px; }

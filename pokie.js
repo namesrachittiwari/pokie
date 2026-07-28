@@ -7,7 +7,7 @@ const mark = (size) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24
 
 /* ================= State ================= */
 const state = {
-  screen: 'welcome',
+  screen: 'chat',
   jobMode: 0,
   jobFilter: {},
   selectedJob: 'sarvam',
@@ -313,34 +313,8 @@ function tabbarHTML() {
     </button>`).join('');
 }
 
-function journeyHTML(labels, current) {
-  return `<div class="journey">${labels.map((label, i) => `
-    ${i > 0 ? `<div class="j-rail" style="background:${i <= current ? PINK : 'rgba(255,255,255,.14)'}"></div>` : ''}
-    <div class="j-step">
-      <span class="j-dot ${i === current ? 'pk-now' : ''}" style="background:${i <= current ? PINK : 'rgba(255,255,255,.18)'}"></span>
-      <span class="j-lb" style="color:${i === current ? '#fff' : i < current ? PINK : DIM}">${label}</span>
-    </div>`).join('')}</div>`;
-}
-
 /* ================= Screens ================= */
 const SCREENS = {
-
-  welcome: () => `
-    <div class="welcome rise">
-      <div style="display:flex;align-items:center;gap:11px">${mark(30)}<span style="font-size:21px;font-weight:600">Pokie</span></div>
-      <div class="welcome-head">
-        <span class="welcome-eyebrow">A fully autonomous job finding and applying agent</span>
-        <h1>Pokie hunts.<br>You only decide.</h1>
-        <p class="welcome-sub">Start with your CV. Everything else, it asks you about.</p>
-      </div>
-      <button class="dropzone" data-go="onboard">
-        <span class="up">↥</span>
-        <span class="t">Drop your CV here</span>
-        <span class="s">or <b>paste a LinkedIn link</b></span>
-      </button>
-      ${journeyHTML(['It reads you', 'You set the bar', 'It runs nightly'], 0)}
-      <span class="footnote">Nothing is sent anywhere until you say so.</span>
-    </div>`,
 
   onboard: () => `
     <div class="onboard rise">
@@ -818,7 +792,7 @@ const SCREENS = {
 };
 
 /* ================= Router & wiring ================= */
-const COLD = ['welcome', 'onboard'];
+const COLD = ['onboard'];
 const app = $('#app'), main = $('#main'), rail = $('#rail'), tabbar = $('#tabbar');
 
 function go(screen) {
