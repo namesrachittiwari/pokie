@@ -164,7 +164,9 @@
 
   /* ================= state ================= */
   const state = {
-    screen: 'home',
+    // Chat is home. Everything the app can do, it can do from here; the
+    // dashboard is still one tap away, as 'overview'.
+    screen: 'chat',
     jobFilter: 'all',      // all | scored | unscored | dismissed
     jobSort: 'score',      // score | newest
     selectedJob: null,
@@ -172,7 +174,16 @@
     histCursor: null,
     sweepId: null,
     sweepPoll: null,
+    backlogPoll: null,
     memEdit: null,
+    // chat
+    chatConv: null,        // active conversation id
+    chatSending: false,    // a turn is in flight -> typing indicator
+    chatDraft: '',         // composer text, preserved across re-renders
+    chatMenu: false,       // mobile conversation dropdown open
+    chatError: null,       // last send failure, shown in place
+    reviewPick: {},   // review id -> chosen cv_version_id (not yet submitted)
+    expandedDiff: {}, // cv_version_id -> bool, CV Lab diff-vs-default toggle
   };
   // Per-screen cache: { loading, error, data }
   const store = {};
@@ -228,7 +239,10 @@
   /* ================= nav ================= */
   const NAV = [
     { title: 'Hunt', items: [
-      { icon: '◎', label: 'Home', key: 'home' },
+      // Chat takes the home slot: it is the way you talk to Pokie, and it can
+      // do everything the other screens can. Overview is the old dashboard.
+      { icon: '◎', label: 'Chat', key: 'chat' },
+      { icon: '▦', label: 'Overview', key: 'overview' },
       { icon: '✦', label: 'Jobs', key: 'jobs' },
       { icon: '⟳', label: 'Live run', key: 'run' },
       { icon: '!', label: 'Needs you', key: 'approve', badgeKey: 'reviews' },
@@ -241,19 +255,35 @@
       { icon: '⊞', label: 'Sources', key: 'sources' },
       { icon: '⏱', label: 'History', key: 'history' },
       { icon: '▤', label: 'Vault', key: 'vault', badgeKey: 'gaps' },
+      { icon: '✎', label: 'CV Lab', key: 'cvlab' },
       { icon: '⚙', label: 'Settings', key: 'settings' },
     ]},
   ];
+  // Five slots, and the phone gets the same two-first ordering as the rail.
+  // Live run moves into More rather than being dropped — it is still reachable,
+  // just not one of the five things you reach for every day.
   const TABS = [
-    { icon: '◎', label: 'Home', key: 'home' },
+    { icon: '◎', label: 'Chat', key: 'chat' },
+    { icon: '▦', label: 'Overview', key: 'overview' },
     { icon: '✦', label: 'Jobs', key: 'jobs' },
-    { icon: '⟳', label: 'Run', key: 'run' },
     { icon: '!', label: 'Needs you', key: 'approve', badgeKey: 'reviews' },
     { icon: '⋯', label: 'More', key: 'more' },
   ];
 
   // Badge counts come from real data once loaded; absent until then.
   const badges = {};
+
+  // The "Needs you" badge counts BOTH things waiting on the user: drafts to
+  // approve AND questions Pokie could not answer from its own data. An
+  // unanswered question blocks a real application, so it cannot be the one
+  // thing the badge stays silent about. The components are kept beside the
+  // total so screens can still show them separately.
+  function setNeedsYouBadge(reviewCount, escalationCount) {
+    badges.reviewsOnly = reviewCount || 0;
+    badges.escalations = escalationCount || 0;
+    badges.reviews = badges.reviewsOnly + badges.escalations;
+  }
+
   function badgeFor(key) {
     const n = badges[key];
     if (!n) return '';
@@ -324,17 +354,20 @@
     render();
   }
 
-  async function loadHome() {
-    const s = slot('home');
+  async function loadOverview() {
+    const s = slot('overview');
     if (s.loading) return;
     s.loading = true; s.error = null;
-    const [jobs, reviews, funnel, spend, beats, gaps, cq] = await Promise.all([
+    const [jobs, reviews, funnel, spend, beats, gaps, cq, safety, esc, logins] = await Promise.all([
       api('/jobs?limit=200'), api('/reviews'), api('/pipeline/funnel_stats'),
       api('/system/spend'), api('/system/heartbeats'), api('/vault/gaps'),
-      api('/applications/confirm_queue'),
+      api('/applications/confirm_queue'), api('/settings/safety'),
+      api('/escalations?status=pending'), api('/sources/login_challenges'),
     ]);
     s.loading = false;
-    const firstErr = [jobs, reviews, funnel, spend, beats, gaps, cq].find(r => !r.ok);
+    // `logins` is intentionally NOT in the error list: a paused browser login
+    // is an extra prompt, never a reason to blank the whole home screen.
+    const firstErr = [jobs, reviews, funnel, spend, beats, gaps, cq, safety, esc].find(r => !r.ok);
     if (firstErr) { s.error = firstErr.error; s.data = null; render(); return; }
     const items = jobs.data.items || [];
     s.data = {
@@ -342,13 +375,16 @@
       scored: items.filter(j => j.score_state === 'scored').length,
       unscored: items.filter(j => j.score_state !== 'scored').length,
       reviews: reviews.data.items || [],
+      escalations: esc.data.items || [],
       funnel: funnel.data,
       spend: spend.data,
       beats: beats.data.items || [],
       gaps: (gaps.data.items || []).filter(g => g.blocking),
       confirm: cq.data.items || [],
+      safety: safety.data,
+      logins: logins.ok ? (logins.data.items || []) : [],
     };
-    badges.reviews = s.data.reviews.length;
+    setNeedsYouBadge(s.data.reviews.length, s.data.escalations.length);
     badges.confirm = s.data.confirm.length;
     badges.gaps = s.data.gaps.length;
     render();
@@ -359,17 +395,41 @@
     const s = slot('reviews');
     if (s.loading) return;
     s.loading = true; s.error = null;
-    const [rev, jobs] = await Promise.all([api('/reviews'), api('/jobs?limit=200')]);
+    const [rev, jobs, esc] = await Promise.all([
+      api('/reviews'), api('/jobs?limit=200'), api('/escalations?status=pending'),
+    ]);
     s.loading = false;
     if (!rev.ok) { s.error = rev.error; s.data = null; render(); return; }
     const byJob = {};
     if (jobs.ok) (jobs.data.items || []).forEach(j => { byJob[j.id] = j; });
     const items = rev.data.items || [];
-    badges.reviews = items.filter(r => r.status === 'pending').length;
-    s.data = { items, byJob };
+    // A failed escalations read is NOT fatal to this screen: the drafts half is
+    // still true and useful. The section reports its own error instead.
+    const escalations = esc.ok ? (esc.data.items || []) : [];
+    setNeedsYouBadge(items.filter(r => r.status === 'pending').length,
+                     escalations.length);
+    s.data = { items, byJob, escalations, escalationsError: esc.ok ? null : esc.error };
     render();
   }
-  const loadSources = () => load('sources', '/sources/health', d => d.items || []);
+  // Sources = health + any login challenge a paused browser login is waiting
+  // on. The challenge fetch is deliberately NON-BLOCKING: if it fails, the
+  // screen still shows every source's health rather than one big error.
+  async function loadSources() {
+    const s = slot('sources');
+    if (s.loading) return;
+    s.loading = true; s.error = null;
+    const [health, ch] = await Promise.all([
+      api('/sources/health'), api('/sources/login_challenges'),
+    ]);
+    s.loading = false;
+    if (!health.ok) { s.error = health.error; s.data = null; render(); return; }
+    s.data = {
+      items: health.data.items || [],
+      challenges: ch.ok ? (ch.data.items || []) : [],
+    };
+    render();
+  }
+  const loadBacklog = () => load('backlog', '/jobs/score_backlog/status');
   const loadHistory = () => load('history', '/activity/log?limit=60', d => d.days || []);
 
   async function loadMemory() {
@@ -431,6 +491,17 @@
     render();
   }
 
+  const loadCvVersions = () => load('cvVersions', '/cv/versions', d => d.items || []);
+  async function loadCvDiff(id) {
+    const s = slot('cvdiff:' + id);
+    if (s.loading || s.data) return;
+    s.loading = true; s.error = null;
+    const res = await api('/cv/versions/' + encodeURIComponent(id) + '/diff');
+    s.loading = false;
+    if (!res.ok) s.error = res.error; else s.data = res.data;
+    render();
+  }
+
   async function loadSettings() {
     const s = slot('settings');
     if (s.loading) return;
@@ -447,6 +518,43 @@
       beats: beats.data.items || [],
       backups: backups.ok ? backups.data : null,
     };
+    render();
+  }
+
+  /* ---- chat ----
+   * Two slots: 'chat' is the conversation LIST (+ suggestion chips), and
+   * 'chat:<id>' is one transcript. They are separate because sending a message
+   * invalidates the transcript but not the list, and because the list has to be
+   * on screen while a transcript is still loading.                          */
+  async function loadChat() {
+    const s = slot('chat');
+    if (s.loading) return;
+    s.loading = true; s.error = null;
+    const res = await api('/chat/conversations?limit=50');
+    s.loading = false;
+    if (!res.ok) { s.error = res.error; s.data = null; render(); return; }
+    s.data = {
+      convs: res.data.items || [],
+      suggestions: res.data.suggestions || [],
+    };
+    // Land in the most recent conversation rather than an empty screen — the
+    // list is newest-first, so item 0 is where the user left off.
+    if (!state.chatConv && s.data.convs.length) {
+      state.chatConv = s.data.convs[0].id;
+    }
+    if (state.chatConv) loadChatThread(state.chatConv);
+    render();
+  }
+
+  async function loadChatThread(id, force) {
+    const key = 'chat:' + id;
+    const s = slot(key);
+    if (s.loading || (s.data && !force)) return;
+    s.loading = true; s.error = null;
+    const res = await api('/chat/conversations/' + encodeURIComponent(id));
+    s.loading = false;
+    if (!res.ok) { s.error = res.error; s.data = null; }
+    else s.data = res.data;
     render();
   }
 
@@ -472,8 +580,8 @@
 
   /* ================= screens ================= */
 
-  function screenHome() {
-    const s = slot('home');
+  function screenOverview() {
+    const s = slot('overview');
     if (s.loading && !s.data) return `<div class="pad">${loadingHTML('your hunt')}</div>`;
     if (s.error) return `<div class="pad">${errorHTML(s.error)}</div>`;
     if (!s.data) return `<div class="pad">${loadingHTML('your hunt')}</div>`;
@@ -482,6 +590,9 @@
       .filter(j => j.score != null)
       .sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 5);
     const beatsDown = d.beats.filter(b => !b.healthy).length;
+    const balance = d.spend.balance_usd;
+    const floor = (d.safety && d.safety.llm_balance_floor_usd) || 0;
+    const balanceLow = balance != null && floor > 0 && balance < floor;
 
     return `<div class="pad home">
       ${pageHead('Your hunt', 'Everything below is live from the backend.',
@@ -491,15 +602,36 @@
         ${statCard('Jobs found', d.jobs.length, '#fff')}
         ${statCard('Scored', d.scored, GREEN)}
         ${statCard('Unscored', d.unscored, d.unscored ? YELLOW : GREY)}
-        ${statCard('Needs you', d.reviews.length, d.reviews.length ? YELLOW : GREY)}
+        ${statCard('Needs you', d.reviews.length + d.escalations.length,
+                   (d.reviews.length + d.escalations.length) ? YELLOW : GREY)}
         ${statCard('In flight', d.funnel.total, BLUE)}
-        ${statCard('LLM spend', '$' + (d.spend.llm_usd_month || 0).toFixed(2), '#fff')}
+        ${statCard('Balance', balance == null ? '—' : '$' + balance.toFixed(2),
+          balanceLow ? PINK : '#fff',
+          'used $' + (d.spend.used_month_usd || 0).toFixed(2) + ' this mo')}
       </div>
+
+      ${balanceLow ? `<div class="banner pink">
+        <div class="t">Balance low — unattended AI work is paused</div>
+        <div class="s">DeepSeek balance is $${balance.toFixed(2)}, below the $${floor.toFixed(2)} floor set in Settings.</div>
+        <button class="pill outline" data-act="go" data-screen="settings">Open settings</button>
+      </div>` : ''}
 
       ${d.gaps.length ? `<div class="banner pink">
         <div class="t">${d.gaps.length} blocking gap${d.gaps.length > 1 ? 's' : ''} in your vault</div>
         <div class="s">${esc(d.gaps.map(g => g.label).join(' · '))}</div>
         <button class="pill outline" data-act="go" data-screen="vault">Fill them in</button>
+      </div>` : ''}
+
+      ${d.escalations.length ? `<div class="banner yellow">
+        <div class="t">${d.escalations.length} question${d.escalations.length > 1 ? 's' : ''} Pokie could not answer</div>
+        <div class="s">${esc(d.escalations[0].question)}${d.escalations.length > 1 ? ' …' : ''}</div>
+        <button class="pill outline" data-act="go" data-screen="approve">Answer them</button>
+      </div>` : ''}
+
+      ${d.logins.length ? `<div class="banner pink">
+        <div class="t">A login needs your code</div>
+        <div class="s">${esc(d.logins.map(c => c.source).join(', '))} — Pokie signed in and the site asked for a verification code. It is holding the page open for a few minutes.</div>
+        <button class="pill outline" data-act="go" data-screen="sources">Enter the code</button>
       </div>` : ''}
 
       ${d.confirm.length ? `<div class="banner yellow">
@@ -538,8 +670,8 @@
       </div>
     </div>`;
   }
-  const statCard = (label, value, colour) => `
-    <div class="stat"><div class="l">${esc(label)}</div><div class="v" style="color:${colour}">${esc(value)}</div></div>`;
+  const statCard = (label, value, colour, sub) => `
+    <div class="stat"><div class="l">${esc(label)}</div><div class="v" style="color:${colour}">${esc(value)}</div>${sub ? `<div class="s">${esc(sub)}</div>` : ''}</div>`;
 
   function screenJobs() {
     const s = slot('jobs');
@@ -685,13 +817,65 @@
   const tag = (label, colour) =>
     `<span class="tag" style="color:${colour};border-color:${colour}33;background:${colour}14">${esc(label)}</span>`;
 
+  // One scoring pass, in the same visual language as the per-source rows.
+  // Every count is the backend's own: 'failed' means the LLM call failed and
+  // the job stayed honestly unscored — nothing was invented for it.
+  function scoringCard(sc, heading) {
+    const rows = [
+      ['Scored', sc.scored, GREEN],
+      ['Gated out before any LLM call', sc.gated_out, GREY],
+      ['Failed — still unscored', sc.unscored, sc.unscored ? YELLOW : GREY],
+    ];
+    return `<div class="eyebrow" style="margin-top:8px">${esc(heading)}</div>
+      <div class="steps-card">
+        ${sc.skipped_reason ? `<div class="step-row">
+          <span class="mk" style="color:${YELLOW}">!</span>
+          <span><span class="tx">Stopped</span><span class="dt">${esc(sc.skipped_reason)}</span></span>
+          <span class="du"></span>
+        </div>` : ''}
+        ${rows.map(([label, n, colour]) => `<div class="step-row">
+          <span class="mk" style="color:${colour}">•</span>
+          <span><span class="tx">${esc(label)}</span></span>
+          <span class="du">${esc(n == null ? 0 : n)}</span>
+        </div>`).join('')}
+        ${sc.remaining_unscored == null ? '' : `<div class="step-row">
+          <span class="mk" style="color:${sc.remaining_unscored ? YELLOW : GREEN}">•</span>
+          <span><span class="tx">Still waiting to be scored</span></span>
+          <span class="du">${esc(sc.remaining_unscored)}</span>
+        </div>`}
+      </div>`;
+  }
+
   function screenRun() {
     const src = slot('sources');
     const sw = slot('sweep');
+    const bl = slot('backlog');
+    const jobs = slot('jobs').data || [];
+    const unscored = jobs.filter(j => j.score_state !== 'scored').length;
+    const scoring = bl.data && bl.data.running;
     const running = sw.data && (sw.data.status === 'running' || sw.data.status === 'queued');
     return `<div class="pad run-page">
       ${pageHead('Live run', 'Trigger a real discovery sweep and watch it land.',
         running ? '' : `<button class="pill primary" style="background:${PINK}" data-act="sweep-now">Start a sweep</button>`)}
+
+      ${unscored && !scoring ? `<div class="banner yellow">
+        <div class="t">${unscored} job${unscored > 1 ? 's have' : ' has'} no score yet</div>
+        <div class="s">Scoring reads each one against your vault. Sweeps do it automatically; this catches up on the backlog.</div>
+        <button class="pill outline" data-act="score-backlog">Score backlog</button>
+      </div>` : ''}
+      ${bl.error ? errorHTML(bl.error) : ''}
+      ${bl.data && (scoring || bl.data.selected || bl.data.skipped_reason) ? `
+        <div class="run-status">
+          <div style="display:flex;align-items:center;gap:14px">
+            ${scoring ? '<span class="spinner"></span>' : `<span style="font-size:22px;color:${GREEN}">✓</span>`}
+            <div style="display:flex;flex-direction:column;gap:2px">
+              <span class="tt">Backlog scoring — ${scoring ? 'running' : 'finished'}</span>
+              <span class="ss">${esc(bl.data.selected)} job${bl.data.selected === 1 ? '' : 's'} picked up so far</span>
+            </div>
+          </div>
+          <div class="counter"><span class="v">${esc(bl.data.scored)}</span></div>
+        </div>
+        ${scoringCard(bl.data, 'This backlog run')}` : ''}
 
       ${sw.error ? errorHTML(sw.error) : ''}
       ${sw.data ? `
@@ -712,13 +896,14 @@
             <span class="du">${r.found} found</span>
           </div>`).join('')}
         </div>` : ''}
+        ${sw.data.scoring ? scoringCard(sw.data.scoring, 'Scoring after this sweep') : ''}
       ` : emptyHTML('No sweep running', 'Start one and its per-source results appear here live.')}
 
       <div class="eyebrow" style="margin-top:8px">Sources Pokie will use</div>
       ${src.loading && !src.data ? loadingHTML('sources')
         : src.error ? errorHTML(src.error)
         : `<div class="steps-card">
-            ${(src.data || []).filter(x => x.enabled).map(x => `<div class="step-row">
+            ${(((src.data || {}).items) || []).filter(x => x.enabled).map(x => `<div class="step-row">
               <span class="mk" style="color:${x.health === 'healthy' ? GREEN : YELLOW}">${x.health === 'healthy' ? '✓' : '!'}</span>
               <span><span class="tx">${esc(x.name)}</span><span class="dt">${esc(titleCase(x.health))}${x.consecutive_failures ? ' · ' + x.consecutive_failures + ' failures' : ''}</span></span>
               <span class="du">${x.last_success_at ? ago(x.last_success_at) : 'never'}</span>
@@ -733,20 +918,69 @@
     if (s.error) return `<div class="pad">${errorHTML(s.error)}</div>`;
     const items = ((s.data && s.data.items) || []).filter(r => r.status === 'pending');
     const byJob = (s.data && s.data.byJob) || {};
-    if (!items.length) {
-      return `<div class="pad">${pageHead('Needs you', 'Drafts waiting on your call.')}
-        ${emptyHTML('Nothing needs you', 'When Pokie drafts an application it lands here first.')}</div>`;
+    const questions = (s.data && s.data.escalations) || [];
+    const questionsError = s.data && s.data.escalationsError;
+    const waiting = items.length + questions.length;
+
+    // Questions come FIRST: an unanswered one is blocking an application that
+    // is already half-filled, and answering it is also what teaches Pokie not
+    // to ask again.
+    const questionsHTML = questionsError
+      ? `<div class="eyebrow">Questions for you</div>${errorHTML(questionsError, 'approve')}`
+      : questions.length
+        ? `<div class="eyebrow">Questions for you</div>
+           ${questions.map(escalationCard).join('')}`
+        : '';
+
+    if (!waiting && !questionsError) {
+      return `<div class="pad">${pageHead('Needs you', 'Drafts and questions waiting on your call.')}
+        ${emptyHTML('Nothing needs you', 'Drafts to approve and questions Pokie cannot answer both land here.')}</div>`;
     }
     return `<div class="pad">
-      ${pageHead('Needs you', items.length + ' waiting on your call.')}
+      ${pageHead('Needs you', waiting + ' waiting on your call.')}
+      ${questionsHTML}
+      ${items.length ? `<div class="eyebrow">Drafts to approve</div>` : ''}
       ${items.map(r => reviewCard(r, byJob[r.job_id])).join('')}
     </div>`;
+  }
+
+  function escalationCard(e) {
+    // Pokie asks only what it could not answer from the vault, the Q&A bank,
+    // memory or its work evidence — and the answer given here is remembered, so
+    // the same question is never asked again.
+    const where = e.job_title
+      ? esc(e.job_title) + (e.company ? ' at ' + esc(e.company) : '')
+      : esc(e.job_id || 'an application');
+    return `<div class="draft-card">
+      <div class="draft-meta">
+        <div class="s">Pokie needs an answer for <b>${where}</b></div>
+        <div class="m">${esc(ago(e.created_at))}${e.field_name ? ' · ' + esc(e.field_name) : ''}</div>
+      </div>
+      <div class="draft-line">${esc(e.question)}</div>
+      <input class="teach-input" id="esc-in-${esc(e.id)}" placeholder="Your answer"
+             autocomplete="off">
+      <div class="rc-actions">
+        <button class="rc-primary" style="background:${GREEN}"
+                data-act="answer-escalation" data-id="${esc(e.id)}">Answer it</button>
+      </div>
+    </div>`;
+  }
+
+  function variantName(id) {
+    const items = (slot('cvVersions').data || []);
+    const v = items.find(x => String(x.id) === String(id));
+    return v ? v.name : null;
   }
 
   function reviewCard(r, job) {
     const d = slot('review:' + r.id);
     if (!d.data && !d.loading && !d.error) loadReviewDetail(r.id);
-    const doc = d.data && (d.data.docs || [])[0];
+    const needsVariant = !!(d.data && d.data.needs_variant_choice);
+    if (needsVariant && !slot('cvVersions').data && !slot('cvVersions').loading) loadCvVersions();
+    const doc = d.data && (d.data.docs || []).find(x => x.doc_type === 'cv');
+    const picked = state.reviewPick[r.id];
+    const variantPool = slot('cvVersions').data || [];
+
     return `<div class="draft-card">
       <div class="draft-meta">
         <div class="s">Draft for <b>${esc(job ? job.title : r.job_id)}</b>${job ? ' at ' + esc(job.company) : ''}</div>
@@ -755,13 +989,29 @@
       ${d.loading && !d.data ? loadingHTML('the draft')
         : d.error ? errorHTML(d.error)
         : doc ? `<div>
-            <div class="eyebrow" style="margin-bottom:8px">${esc(titleCase(doc.doc_type))}</div>
-            ${esc(doc.content).split('\n').filter(Boolean).map(l => `<div class="draft-line">${l}</div>`).join('')}
+            <div class="eyebrow" style="margin-bottom:2px">CV${doc.cv_version_id && variantName(doc.cv_version_id) ? ' — ' + esc(variantName(doc.cv_version_id)) : ''}</div>
+            ${doc.file_path ? `<div class="s dim" style="margin-bottom:8px">${esc(doc.file_path.split('/').pop())}</div>` : ''}
+            ${esc(doc.content).split('\n').filter(Boolean).slice(0, 12).map(l => `<div class="draft-line">${l}</div>`).join('')}
           </div>`
-        : emptyHTML('No document on this review', 'Nothing was generated for it yet.')}
+        : needsVariant
+          ? `<div class="why-point"><span class="m" style="color:${YELLOW}">◆</span><span class="t">This job scored high enough to pick a CV variant yourself — choose one below, then approve.</span></div>`
+          : emptyHTML('No document on this review', 'Nothing was generated for it yet.')}
       ${d.data && d.data.note ? `<div class="why-point"><span class="m" style="color:${YELLOW}">◆</span><span class="t">${esc(d.data.note)}</span></div>` : ''}
+
+      ${needsVariant ? `<div style="margin-top:10px">
+        <div class="s dim" style="margin-bottom:6px">Pick a CV variant:</div>
+        ${variantPool.length ? `<div class="seg" style="flex-wrap:wrap">
+          ${variantPool.map(v => `<span class="${String(picked) === String(v.id) ? 'on' : ''}"
+              style="${String(picked) === String(v.id) ? 'background:#fff;color:#070707' : ''}"
+              data-act="pick-variant" data-id="${esc(r.id)}" data-variant="${esc(v.id)}">${esc(v.name)}</span>`).join('')}
+        </div>` : (slot('cvVersions').loading
+          ? loadingHTML('variants')
+          : `<div class="s dim">No variants generated yet — Approve uses the default CV. Generate them from <b>CV Lab</b>.</div>`)}
+      </div>` : ''}
+
       <div class="rc-actions">
-        <button class="rc-primary" style="background:${GREEN}" data-act="review-approve" data-id="${esc(r.id)}">Approve</button>
+        <button class="rc-primary" style="background:${GREEN}" data-act="review-approve" data-id="${esc(r.id)}"
+          ${needsVariant && !picked && variantPool.length ? 'disabled title="Pick a CV variant first"' : ''}>Approve</button>
         <button class="rc-secondary" data-act="review-revise" data-id="${esc(r.id)}">Ask for a revision</button>
         <button class="rc-secondary" data-act="review-reject" data-id="${esc(r.id)}">Reject</button>
       </div>
@@ -882,22 +1132,53 @@
       </div>`;
   }
 
+  // The real state of one source, in the colour the rest of the app already
+  // uses: green = answering, pink = it needs YOU, yellow = degraded/expired,
+  // grey = deliberately off.
+  const SOURCE_TONE = {
+    healthy: GREEN, needs_login: PINK, session_expired: YELLOW,
+    degraded: YELLOW, disabled: GREY,
+  };
+  const sourceTone = (health) => SOURCE_TONE[health] || YELLOW;
+  const SOURCE_LABEL = {
+    healthy: 'Healthy', needs_login: 'Needs login',
+    session_expired: 'Session expired', degraded: 'Degraded', disabled: 'Off',
+  };
+
   function screenSources() {
     const s = slot('sources');
     if (s.loading && !s.data) return `<div class="pad">${loadingHTML('sources')}</div>`;
     if (s.error) return `<div class="pad">${errorHTML(s.error)}</div>`;
-    const items = s.data || [];
+    const items = (s.data && s.data.items) || [];
+    const challenges = (s.data && s.data.challenges) || [];
+    const bySource = {};
+    challenges.forEach(c => { if (!bySource[c.source]) bySource[c.source] = c; });
     return `<div class="pad">
       ${pageHead('Sources', 'Where Pokie looks, and whether each one is answering.')}
+      ${challenges.length ? `<div class="banner pink" style="margin-bottom:18px">
+        <div class="t">${challenges.length === 1 ? 'A login needs your code' : challenges.length + ' logins need your code'}</div>
+        <div class="s">Type the code the site sent you next to the source below. Pokie is holding the page open.</div>
+      </div>` : ''}
       <div class="day-card">
-        ${items.map(x => `<div class="hist-row r3">
-          <span class="actor" style="background:${x.health === 'healthy' ? 'rgba(28,225,95,.14)' : 'rgba(236,226,46,.16)'};color:${x.health === 'healthy' ? GREEN : YELLOW}">${esc(titleCase(x.health))}</span>
+        ${items.map(x => {
+          const tone = sourceTone(x.health);
+          const ch = bySource[x.id];
+          return `<div class="hist-row r3">
+          <span class="actor" style="background:${tone}22;color:${tone}">${esc(SOURCE_LABEL[x.health] || titleCase(x.health))}</span>
           <span><span class="tx">${esc(x.name)}</span><span class="dt">${x.last_success_at ? 'last ok ' + ago(x.last_success_at) : 'no successful run yet'}${x.consecutive_failures ? ' · ' + x.consecutive_failures + ' failures in a row' : ''}</span></span>
           <span style="display:flex;gap:8px;justify-content:flex-end">
             <button class="hist-act" style="color:${x.enabled ? GREY : GREEN};border-color:var(--bstrong)" data-act="source-toggle" data-id="${esc(x.id)}">${x.enabled ? 'Turn off' : 'Turn on'}</button>
-            <button class="hist-act" style="color:${PINK};border-color:rgba(235,107,168,.32)" data-act="source-repair" data-id="${esc(x.id)}">Repair</button>
+            <button class="hist-act" style="color:${PINK};border-color:rgba(235,107,168,.32)" data-act="source-repair" data-id="${esc(x.id)}">${x.health === 'needs_login' ? 'Log in' : 'Repair'}</button>
           </span>
-        </div>`).join('') || `<div style="padding:20px">${emptyHTML('No sources registered')}</div>`}
+        </div>${ch ? `<div class="hist-row r3">
+          <span class="actor" style="background:${PINK}22;color:${PINK}">Code</span>
+          <span><span class="tx">${esc(ch.question)}</span><span class="dt">asked ${esc(ago(ch.created_at))} · Pokie stops waiting a few minutes after that</span></span>
+          <span style="display:flex;gap:8px;justify-content:flex-end">
+            <input class="teach-input" id="otp-in-${esc(ch.id)}" style="width:130px" placeholder="Code" autocomplete="one-time-code">
+            <button class="hist-act" style="color:${PINK};border-color:rgba(235,107,168,.32)" data-act="source-otp" data-id="${esc(ch.id)}">Send code</button>
+          </span>
+        </div>` : ''}`;
+        }).join('') || `<div style="padding:20px">${emptyHTML('No sources registered')}</div>`}
       </div>
     </div>`;
   }
@@ -976,6 +1257,49 @@
     </div>`;
   }
 
+  function screenCvLab() {
+    const s = slot('cvVersions');
+    if (s.loading && !s.data) return `<div class="pad">${loadingHTML('the CV variant pool')}</div>`;
+    if (s.error) return `<div class="pad">${errorHTML(s.error)}</div>`;
+    const items = s.data || [];
+    return `<div class="pad">
+      ${pageHead('CV Lab', 'Named content variants of your CV — one gets picked (or auto-picked) per job.',
+        `<div style="display:flex;gap:8px">
+          <button class="pill outline" data-act="improve-variants">Improve from feedback</button>
+          <button class="pill primary" style="background:${PINK}" data-act="generate-variants">Generate variants</button>
+        </div>`)}
+      ${items.length
+        ? `<div class="perm-card">${items.map((v, i) => cvVariantRow(v, i === 0)).join('')}</div>`
+        : emptyHTML('No variants yet', 'Generate variants to seed the pool from your master CV.')}
+    </div>`;
+  }
+
+  function cvVariantRow(v, first) {
+    const expanded = !!state.expandedDiff[v.id];
+    if (expanded) loadCvDiff(v.id);
+    const diffSlot = slot('cvdiff:' + v.id);
+    return `<div class="perm-row" ${first ? 'style="border-top:0"' : ''}>
+      <div style="flex:1;min-width:0">
+        <div class="t">${esc(v.name)}${v.is_default ? ` <span class="tag" style="color:${GREEN};border-color:${GREEN}33;background:${GREEN}14">default</span>` : ''}</div>
+        <div class="s dim">${v.usage_count} sent · reply rate ${v.reply_rate == null ? '—' : Math.round(v.reply_rate * 100) + '%'}${v.note ? ' · ' + esc(v.note) : ''}</div>
+        ${expanded ? `<div style="margin-top:8px">
+          ${diffSlot.loading && !diffSlot.data ? loadingHTML('the diff')
+            : diffSlot.error ? errorHTML(diffSlot.error)
+            : (diffSlot.data && diffSlot.data.items.length
+              ? diffSlot.data.items.map(d => `<div class="signal">
+                  <span class="m" style="color:${d.op === 'cut' || d.op === 'rejected' ? YELLOW : GREEN}">${d.op === 'cut' ? '−' : d.op === 'add' ? '+' : '~'}</span>
+                  <span class="t">${esc(d.text)}${d.reason ? ` <span class="dim">(${esc(d.reason)})</span>` : ''}</span>
+                </div>`).join('')
+              : '<div class="s dim">Identical to Default.</div>')}
+        </div>` : ''}
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0">
+        <button class="pill dim" data-act="toggle-variant-diff" data-id="${esc(v.id)}">${expanded ? 'Hide diff' : 'View diff'}</button>
+        ${!v.is_default ? `<button class="pill outline" data-act="set-default-variant" data-id="${esc(v.id)}">Set default</button>` : ''}
+      </div>
+    </div>`;
+  }
+
   function screenSettings() {
     const s = slot('settings');
     if (s.loading && !s.data) return `<div class="pad">${loadingHTML('settings')}</div>`;
@@ -1001,8 +1325,16 @@
           <input class="teach-input num" data-set="daily_cap" value="${esc(d.safety.daily_cap)}">
         </div>
         <div class="perm-row">
+          <div><div class="t">Daily scoring cap</div><div class="s dim">Most jobs Pokie will score in a day — one LLM call each. Separate from the send cap above.</div></div>
+          <input class="teach-input num" data-set="score_daily_cap" value="${esc(d.safety.score_daily_cap)}">
+        </div>
+        <div class="perm-row">
           <div><div class="t">Follow-ups</div><div class="s dim">Auto-send chases silence for ATS and email applications; draft only always leaves it for you to send.</div></div>
           <div class="seg">${MODES.map(m => `<span class="${d.safety.followup_mode === m.v ? 'on' : ''}" style="${d.safety.followup_mode === m.v ? 'background:#fff;color:#070707' : ''}" data-act="set-followup" data-v="${m.v}">${esc(m.label)}</span>`).join('')}</div>
+        </div>
+        <div class="perm-row">
+          <div><div class="t">Balance floor</div><div class="s dim">Pause unattended AI work when the DeepSeek balance drops below this (USD). 0 disables it.</div></div>
+          <input class="teach-input num" data-set="llm_balance_floor_usd" value="${esc(d.safety.llm_balance_floor_usd)}">
         </div>
       </div>
       <button class="pill primary" style="background:${PINK};align-self:flex-start" data-act="save-safety">Save safety settings</button>
@@ -1022,6 +1354,8 @@
           <div class="eyebrow">Spend — ${esc(d.spend.period)}</div>
           <div class="sbar-line"><span class="l">LLM</span><span class="v">$${(d.spend.llm_usd_month || 0).toFixed(2)}</span></div>
           <div class="sbar-line"><span class="l">Proxy</span><span class="v">$${(d.spend.proxy_usd_month || 0).toFixed(2)}</span></div>
+          ${Object.entries(d.spend.by_task || {}).map(([k, v]) => `
+            <div class="sbar-line"><span class="l dim">${esc(titleCase(k))}</span><span class="v">$${(v || 0).toFixed(2)}</span></div>`).join('')}
         </div>
         <div class="score-card">
           <div class="eyebrow">Background services</div>
@@ -1038,11 +1372,15 @@
 
   function screenMore() {
     const rest = [
+      // Live run lost its tab slot to Overview; it is still one tap away, and
+      // a screen you cannot reach is a screen that does not exist.
+      { icon: '⟳', label: 'Live run', key: 'run' },
       { icon: '➤', label: 'Applications', key: 'applications' },
       { icon: '◈', label: 'Memory', key: 'memory' },
       { icon: '⊞', label: 'Sources', key: 'sources' },
       { icon: '⏱', label: 'History', key: 'history' },
       { icon: '▤', label: 'Vault', key: 'vault' },
+      { icon: '✎', label: 'CV Lab', key: 'cvlab' },
       { icon: '⚙', label: 'Settings', key: 'settings' },
     ];
     return `<div class="pad">
@@ -1057,20 +1395,235 @@
     </div>`;
   }
 
+  /* ================= chat ================= */
+
+  // Markdown-lite, and lite on purpose: line breaks and bold, nothing else.
+  // ESCAPING HAPPENS FIRST and unconditionally — the model's output is
+  // untrusted text, and a chat that renders whatever an LLM emits is an XSS
+  // hole with a personality. Only these two patterns are re-introduced, over
+  // already-escaped text, so no tag can survive from the source.
+  const mdLite = (s) => esc(s)
+    .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+    .replace(/\n/g, '<br>');
+
+  const convLabel = (c) =>
+    (c.title && c.title.trim()) ? c.title : 'Untitled chat';
+
+  function chatBlock(b) {
+    const p = b.payload || {};
+    if (b.type === 'text') {
+      return `<div class="a-text md">${mdLite(p.text || '')}</div>`;
+    }
+    if (b.type === 'tool_call') {
+      // Deliberately NOT clickable: it is a receipt of what Pokie did, and a
+      // control that looks tappable but does nothing is the thing this app
+      // does not ship.
+      const colour = p.ok === false ? PINK : p.pending ? YELLOW : p.writes ? GREEN : GREY;
+      return `<div class="tool-round">
+        <span class="mk" style="color:${colour}">${p.ok === false ? '✕' : p.pending ? '⏸' : '✓'}</span>
+        <span class="nm">${esc(p.tool || 'tool')}</span>
+        <span class="sm">${esc(p.error || p.summary || '')}</span>
+        ${p.writes ? `<span class="wr" style="color:${GREEN}">write</span>` : ''}
+      </div>`;
+    }
+    if (b.type === 'job_list') {
+      const items = p.items || [];
+      if (!items.length) return '';
+      return `<div class="score-card">
+        ${items.map(j => `
+          <button class="mini-job" data-act="open-job" data-id="${esc(j.id)}">
+            <span class="job-av" style="background:${scoreColour(j.score)};width:34px;height:34px;border-radius:11px;font-size:13px">${esc(initials(j.company))}</span>
+            <span class="mj-col">
+              <span class="mj-role">${esc(j.title)}</span>
+              <span class="mj-co">${esc(j.company)} · ${esc(j.location || '—')}</span>
+            </span>
+            <span class="job-score" style="color:${scoreColour(j.score)}">${j.score == null ? '—' : Math.round(j.score)}</span>
+          </button>`).join('')}
+        ${p.total && p.total > items.length
+          ? `<div class="s dim">…and ${p.total - items.length} more.</div>` : ''}
+      </div>`;
+    }
+    if (b.type === 'confirm') return confirmBlock(b, p);
+    // An unknown block type is skipped rather than guessed at — a future
+    // block kind must not render as garbage in an old client.
+    return '';
+  }
+
+  function confirmBlock(b, p) {
+    const preview = p.preview || [];
+    const resolved = b.status && b.status !== 'pending';
+    return `<div class="confirm-card ${resolved ? 'done' : ''}">
+      <div class="cc-top">
+        <span class="cc-tag" style="color:${resolved ? GREY : YELLOW}">
+          ${resolved ? esc(titleCase(b.status)) : 'Needs your say-so'}</span>
+        <span class="cc-n">${p.matched_count == null ? '' : p.matched_count + ' item' + (p.matched_count === 1 ? '' : 's')}</span>
+      </div>
+      <div class="cc-title">${esc(p.summary || 'Pokie wants to do something')}</div>
+      ${p.preview_error ? `<div class="cc-warn">Could not resolve what this would touch: ${esc(p.preview_error)}</div>` : ''}
+      ${preview.length ? `<div class="kv">
+        ${preview.slice(0, 8).map(i => `<div class="kv-row">
+          <span class="k">${esc(i.title || i.job_id || i.id || '—')}</span>
+          <span class="v">${esc(i.company || i.state || '')}</span>
+        </div>`).join('')}
+        ${preview.length > 8 || p.truncated
+          ? `<div class="kv-row"><span class="k">…and more</span><span class="v"></span></div>` : ''}
+      </div>` : ''}
+      ${resolved ? '' : `<div class="rc-actions">
+        <button class="rc-primary" style="background:${GREEN}" data-act="chat-confirm" data-id="${esc(b.id)}">Do it</button>
+        <button class="rc-secondary" data-act="chat-cancel" data-id="${esc(b.id)}">Cancel</button>
+      </div>`}
+    </div>`;
+  }
+
+  function chatTurn(m) {
+    if (m.role === 'user') {
+      return `<div class="u-bubble">${mdLite(m.text || '')}</div>`;
+    }
+    const blocks = (m.blocks || []).map(chatBlock).join('');
+    return `<div class="a-turn">
+      <span class="a-mark">${mark(22)}</span>
+      <div class="a-body">
+        ${blocks || `<div class="a-text md">${mdLite(m.text || '')}</div>`}
+        ${m.status === 'error' ? `<div class="cc-warn">That turn did not finish cleanly.</div>` : ''}
+      </div>
+    </div>`;
+  }
+
+  const typingHTML = () => `<div class="a-turn">
+      <span class="a-mark">${mark(22)}</span>
+      <div class="a-body"><div class="typing"><i></i><i></i><i></i></div></div>
+    </div>`;
+
+  function chatComposer(suggestions) {
+    return `<div class="chat-composer-outer">
+      ${state.chatError ? `<div class="cc-warn">${esc(state.chatError)}</div>` : ''}
+      ${suggestions.length ? `<div class="chip-row">
+        ${suggestions.slice(0, 5).map(s => `
+          <button class="sug-chip" data-act="chat-suggest" data-text="${esc(s.text || s.label)}">${esc(s.label)}</button>`).join('')}
+      </div>` : ''}
+      <div class="chat-composer">
+        <textarea id="chat-input" rows="1" placeholder="Ask Pokie anything, or tell it what to change…"
+          ${state.chatSending ? 'disabled' : ''}></textarea>
+        <button class="send-dot" data-act="chat-send" title="Send"
+          ${state.chatSending ? 'disabled' : ''}>↑</button>
+      </div>
+      <div class="chat-hint">Enter sends · Shift+Enter for a new line. Pokie acts on what you say; only a real submission or a bulk change over 10 rows asks first.</div>
+    </div>`;
+  }
+
+  function chatConvList() {
+    const s = slot('chat');
+    const convs = (s.data && s.data.convs) || [];
+    return `<div class="conv-col">
+      <div class="conv-head">
+        <span class="eyebrow">Chats</span>
+        <button class="mini-pill" data-act="chat-new">+ New</button>
+      </div>
+      <div class="conv-list">
+        ${convs.length ? convs.map(c => `
+          <button class="conv-item ${c.id === state.chatConv ? 'on' : ''}" data-act="chat-open" data-id="${esc(c.id)}">
+            <span class="ct">${esc(convLabel(c))}</span>
+            <span class="cm">${esc(ago(c.last_message_at || c.created_at))} · ${c.message_count} msg</span>
+          </button>`).join('')
+          : `<div class="conv-empty">No chats yet.</div>`}
+      </div>
+    </div>`;
+  }
+
+  function screenChat() {
+    const s = slot('chat');
+    if (s.loading && !s.data) return `<div class="pad">${loadingHTML('your chats')}</div>`;
+    if (s.error) return `<div class="pad">${errorHTML(s.error, 'chat')}</div>`;
+
+    const convs = (s.data && s.data.convs) || [];
+    const suggestions = (s.data && s.data.suggestions) || [];
+    const active = convs.find(c => c.id === state.chatConv) || null;
+    const thread = state.chatConv ? slot('chat:' + state.chatConv) : null;
+    const messages = (thread && thread.data && thread.data.messages) || [];
+
+    let body;
+    if (!state.chatConv) {
+      // Cold start: greeting + composer, centred. Nothing is faked here — there
+      // genuinely is no conversation yet.
+      body = `<div class="chat-centre">
+        <div class="chat-greet">
+          ${mark(46)}
+          <div class="h">What should I do next?</div>
+          <div class="s">I can read anything and change anything. Ask, or just tell me.</div>
+        </div>
+        <div class="chat-composer-wrap">${chatComposer(suggestions)}</div>
+      </div>`;
+    } else if (thread && thread.loading && !thread.data) {
+      body = `<div class="pad">${loadingHTML('this chat')}</div>`;
+    } else if (thread && thread.error) {
+      body = `<div class="pad">${errorHTML(thread.error, 'chat')}</div>`;
+    } else {
+      body = `
+        <div class="thread-scroll" id="chat-scroll">
+          <div class="thread">
+            ${messages.length ? messages.map(chatTurn).join('')
+              : emptyHTML('Nothing said yet', 'Ask for something and Pokie will get on with it.')}
+            ${state.chatSending ? typingHTML() : ''}
+          </div>
+        </div>
+        <div class="thread-composer">
+          <div class="chat-composer-wrap">${chatComposer(messages.length ? [] : suggestions)}</div>
+        </div>`;
+    }
+
+    return `<div class="chat-layout">
+      ${chatConvList()}
+      <div class="chat-shell">
+        <div class="chat-top hair">
+          <button class="conv-trigger" data-act="chat-menu">
+            <span class="ct">${esc(active ? convLabel(active) : 'New chat')}</span>
+            <span class="cv">⌄</span>
+          </button>
+          <div class="chat-status">
+            <span class="live-dot"></span><span>Pokie is listening</span>
+          </div>
+        </div>
+        ${state.chatMenu ? `<div class="conv-menu">
+          <button class="conv-item" data-act="chat-new">+ New chat</button>
+          ${convs.map(c => `
+            <button class="conv-item ${c.id === state.chatConv ? 'on' : ''}" data-act="chat-open" data-id="${esc(c.id)}">
+              <span class="ct">${esc(convLabel(c))}</span>
+              <span class="cm">${esc(ago(c.last_message_at || c.created_at))}</span>
+            </button>`).join('')}
+        </div>` : ''}
+        ${body}
+      </div>
+    </div>`;
+  }
+
   const SCREENS = {
-    home: screenHome, jobs: screenJobs, run: screenRun, approve: screenApprove,
+    chat: screenChat, overview: screenOverview,
+    jobs: screenJobs, run: screenRun, approve: screenApprove,
     applications: screenApplications, memory: screenMemory, sources: screenSources,
-    history: screenHistory, vault: screenVault, settings: screenSettings,
-    more: screenMore,
+    history: screenHistory, vault: screenVault, cvlab: screenCvLab,
+    settings: screenSettings, more: screenMore,
   };
 
   /* ================= data needed per screen ================= */
   function ensureData() {
     switch (state.screen) {
-      case 'home': if (!slot('home').data && !slot('home').loading && !slot('home').error) loadHome(); break;
+      case 'chat': if (!slot('chat').data && !slot('chat').loading && !slot('chat').error) loadChat(); break;
+      case 'overview': if (!slot('overview').data && !slot('overview').loading && !slot('overview').error) loadOverview(); break;
       case 'jobs': if (!slot('jobs').data && !slot('jobs').loading && !slot('jobs').error) loadJobs(); break;
       case 'run':
         if (!slot('sources').data && !slot('sources').loading && !slot('sources').error) loadSources();
+        // The feed tells this screen whether a backlog is waiting; the status
+        // endpoint tells it whether a run is already going (e.g. started
+        // before a reload, or by the sweep tail).
+        if (!slot('jobs').data && !slot('jobs').loading && !slot('jobs').error) loadJobs();
+        if (!slot('backlog').data && !slot('backlog').loading && !slot('backlog').error) {
+          // A run started before a reload is still going on the server; pick
+          // its progress back up rather than showing a frozen snapshot.
+          loadBacklog().then(() => {
+            const b = slot('backlog').data;
+            if (b && b.running && !state.backlogPoll) pollBacklog();
+          });
+        }
         break;
       case 'approve': if (!slot('reviews').data && !slot('reviews').loading && !slot('reviews').error) loadReviews(); break;
       case 'applications': if (!slot('applications').data && !slot('applications').loading && !slot('applications').error) loadApplications(); break;
@@ -1078,6 +1631,7 @@
       case 'sources': if (!slot('sources').data && !slot('sources').loading && !slot('sources').error) loadSources(); break;
       case 'history': if (!slot('history').data && !slot('history').loading && !slot('history').error) loadHistory(); break;
       case 'vault': if (!slot('vault').data && !slot('vault').loading && !slot('vault').error) loadVault(); break;
+      case 'cvlab': if (!slot('cvVersions').data && !slot('cvVersions').loading && !slot('cvVersions').error) loadCvVersions(); break;
       case 'settings': if (!slot('settings').data && !slot('settings').loading && !slot('settings').error) loadSettings(); break;
     }
   }
@@ -1085,15 +1639,36 @@
   /* ================= render ================= */
   const app = () => $('#app'), mainEl = () => $('#main');
   function render() {
-    const fn = SCREENS[state.screen] || screenHome;
+    const fn = SCREENS[state.screen] || screenChat;
     $('#rail').innerHTML = railHTML();
     $('#tabbar').innerHTML = tabbarHTML();
     mainEl().innerHTML = fn();
     app().classList.remove('cold');
+    if (state.screen === 'chat') restoreChatComposer();
+  }
+
+  // innerHTML replacement throws away the composer's value, its caret and its
+  // focus every render — and a render happens on every poll, badge update and
+  // action. The draft is therefore kept in state and put back here, so typing
+  // a long message while something else refreshes does not lose it.
+  function restoreChatComposer() {
+    const input = $('#chat-input');
+    if (input) {
+      input.value = state.chatDraft;
+      autoGrow(input);
+      if (!state.chatSending) input.focus();
+    }
+    const scroll = $('#chat-scroll');
+    if (scroll) scroll.scrollTop = scroll.scrollHeight;
+  }
+
+  function autoGrow(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(160, el.scrollHeight) + 'px';
   }
 
   function go(screen) {
-    if (!SCREENS[screen]) screen = 'home';
+    if (!SCREENS[screen]) screen = 'chat';
     state.screen = screen;
     state.mobileDetail = false;
     if (location.hash.replace('#', '') !== screen) location.hash = screen;
@@ -1105,8 +1680,37 @@
   /* ================= actions ================= */
   const ACTIONS = {
     go: (el) => go(el.dataset.screen),
-    reload: (el) => { delete store[el.dataset.screen]; store['home'] && delete store['home']; ensureData(); render(); },
+    reload: (el) => { delete store[el.dataset.screen]; store['overview'] && delete store['overview']; ensureData(); render(); },
     logout: () => { tokens.clear(); location.reload(); },
+
+    /* ---- chat ---- */
+    'chat-new': async () => {
+      state.chatMenu = false;
+      const res = await api('/chat/conversations', {
+        method: 'POST', body: JSON.stringify({}),
+      });
+      if (!res.ok) return toast('Could not start a chat: ' + res.error);
+      state.chatConv = res.data.id;
+      state.chatDraft = ''; state.chatError = null;
+      slot('chat:' + res.data.id).data = {
+        conversation: res.data, messages: [], suggestions: [],
+      };
+      loadChat();
+      render();
+    },
+    'chat-open': (el) => {
+      state.chatConv = el.dataset.id;
+      state.chatMenu = false;
+      state.chatError = null;
+      loadChatThread(el.dataset.id);
+      render();
+    },
+    'chat-menu': () => { state.chatMenu = !state.chatMenu; render(); },
+    'chat-suggest': (el) => { state.chatDraft = el.dataset.text || ''; sendChat(); },
+    'chat-send': () => sendChat(),
+
+    'chat-confirm': (el) => resolveChatAction(el.dataset.id, 'confirm'),
+    'chat-cancel': (el) => resolveChatAction(el.dataset.id, 'reject'),
 
     'job-filter': (el) => { state.jobFilter = el.dataset.v; state.selectedJob = null; render(); },
     'job-sort': () => { state.jobSort = state.jobSort === 'score' ? 'newest' : 'score'; render(); },
@@ -1125,7 +1729,7 @@
       });
       if (!res.ok) return toast('Could not dismiss: ' + res.error);
       toast('Dismissed. It will not come back.');
-      delete store['jobs']; delete store['job:' + el.dataset.id]; delete store['home'];
+      delete store['jobs']; delete store['job:' + el.dataset.id]; delete store['overview'];
       state.selectedJob = null; state.mobileDetail = false;
       ensureData(); render();
     },
@@ -1135,7 +1739,7 @@
       });
       if (!res.ok) return toast('Could not start a draft: ' + res.error);
       toast('Drafting — it will appear under Needs you.');
-      delete store['reviews']; delete store['home'];
+      delete store['reviews']; delete store['overview'];
     },
 
     'sweep-now': async () => {
@@ -1148,7 +1752,37 @@
       pollSweep();
     },
 
-    'review-approve': (el) => decideReview(el.dataset.id, 'approve'),
+    'score-backlog': async () => {
+      const res = await api('/jobs/score_backlog', { method: 'POST', body: JSON.stringify({}) });
+      if (!res.ok) return toast('Could not start scoring: ' + res.error);
+      slot('backlog').data = res.data;
+      slot('backlog').error = null;
+      toast(res.data.status === 'already_running'
+        ? 'Scoring is already running.' : 'Scoring the backlog.');
+      go('run');
+      pollBacklog();
+    },
+    'answer-escalation': async (el) => {
+      const input = $('#esc-in-' + el.dataset.id);
+      const answer = input ? input.value.trim() : '';
+      if (!answer) return toast('Type an answer first.');
+      const res = await api('/escalations/' + encodeURIComponent(el.dataset.id) + '/answer', {
+        method: 'POST', body: JSON.stringify({ answer }),
+      });
+      if (!res.ok) return toast('Could not save that answer: ' + res.error);
+      toast('Answered — Pokie will not ask that again.');
+      // Home and Applications both show escalation-derived counts, and Memory
+      // may have gained a proposal from this answer.
+      delete store['reviews']; delete store['overview']; delete store['applications'];
+      delete store['memory'];
+      ensureData(); render();
+    },
+
+
+    'review-approve': (el) => {
+      const picked = state.reviewPick[el.dataset.id];
+      decideReview(el.dataset.id, 'approve', picked ? { cv_version_id: picked } : {});
+    },
     'review-reject': (el) => decideReview(el.dataset.id, 'reject'),
     'review-revise': async (el) => {
       const note = prompt('What should Pokie change?');
@@ -1168,7 +1802,7 @@
       });
       if (!res.ok) return toast('Could not submit: ' + res.error);
       toast('Submitted.');
-      delete store['applications']; delete store['home']; ensureData(); render();
+      delete store['applications']; delete store['overview']; ensureData(); render();
     },
     'discard-app': async (el) => {
       const res = await api('/applications/' + encodeURIComponent(el.dataset.id) + '/discard', {
@@ -1176,7 +1810,7 @@
       });
       if (!res.ok) return toast('Could not discard: ' + res.error);
       toast('Discarded.');
-      delete store['applications']; delete store['home']; ensureData(); render();
+      delete store['applications']; delete store['overview']; ensureData(); render();
     },
 
     'prop-accept': async (el) => {
@@ -1227,7 +1861,8 @@
     },
 
     'source-toggle': async (el) => {
-      const cur = (slot('sources').data || []).find(x => x.id === el.dataset.id);
+      const cur = (((slot('sources').data || {}).items) || [])
+        .find(x => x.id === el.dataset.id);
       const res = await api('/sources/' + encodeURIComponent(el.dataset.id) + '/toggle', {
         method: 'POST', body: JSON.stringify({ enabled: !(cur && cur.enabled) }),
       });
@@ -1240,8 +1875,25 @@
         method: 'POST', body: JSON.stringify({}),
       });
       if (!res.ok) return toast('Repair failed: ' + res.error);
-      toast('Repair requested.');
-      delete store['sources']; ensureData(); render();
+      const status = res.data && res.data.status;
+      // A browser login runs in the background and may come back asking for a
+      // code — say that, rather than implying it is already fixed.
+      toast(status === 'started' ? 'Signing in — watch this screen for a code request.'
+        : status === 'in_progress' ? 'Already signing in.'
+        : status === 'not_applicable' ? 'That source has no login to repair.'
+        : 'Repair requested.');
+      delete store['sources']; delete store['overview']; ensureData(); render();
+    },
+    'source-otp': async (el) => {
+      const input = $('#otp-in-' + el.dataset.id);
+      const answer = input ? input.value.trim() : '';
+      if (!answer) return toast('Type the code the site sent you first.');
+      const res = await api(
+        '/sources/login_challenges/' + encodeURIComponent(el.dataset.id) + '/answer',
+        { method: 'POST', body: JSON.stringify({ answer }) });
+      if (!res.ok) return toast('Could not send the code: ' + res.error);
+      toast('Code sent — finishing the login.');
+      delete store['sources']; delete store['overview']; ensureData(); render();
     },
 
     'set-followup': (el) => {
@@ -1254,7 +1906,12 @@
         auto_threshold: parseFloat($('[data-set="auto_threshold"]').value),
         daily_cap: parseInt($('[data-set="daily_cap"]').value, 10),
         followup_mode: d.safety.followup_mode,
+        llm_balance_floor_usd: parseFloat($('[data-set="llm_balance_floor_usd"]').value),
       };
+      // Additive field: only sent when the input is actually on screen, so an
+      // older backend that does not know it is never handed a surprise.
+      const scoreCap = $('[data-set="score_daily_cap"]');
+      if (scoreCap) body.score_daily_cap = parseInt(scoreCap.value, 10);
       const res = await api('/settings/safety', { method: 'PUT', body: JSON.stringify(body) });
       if (!res.ok) return toast('Could not save: ' + res.error);
       toast('Safety settings saved.');
@@ -1284,39 +1941,199 @@
       const res = await api('/vault/profile', { method: 'PUT', body: JSON.stringify(body) });
       if (!res.ok) return toast('Could not save: ' + res.error);
       toast('Vault saved.');
-      delete store['vault']; delete store['home']; ensureData(); render();
+      delete store['vault']; delete store['overview']; ensureData(); render();
+    },
+
+    'generate-variants': async () => {
+      const res = await api('/cv/versions/generate', { method: 'POST', body: JSON.stringify({}) });
+      if (!res.ok) return toast('Could not generate variants: ' + res.error);
+      toast('Variant pool ready.');
+      delete store['cvVersions']; ensureData(); render();
+    },
+    'improve-variants': async () => {
+      const res = await api('/cv/versions/improve', { method: 'POST', body: JSON.stringify({}) });
+      if (!res.ok) return toast('Could not improve variants: ' + res.error);
+      toast(res.data.consumed
+        ? `Consumed ${res.data.consumed} note${res.data.consumed === 1 ? '' : 's'} — ${res.data.variants_updated.length} variant${res.data.variants_updated.length === 1 ? '' : 's'} updated.`
+        : 'No new feedback to consume.');
+      delete store['cvVersions'];
+      res.data.variants_updated.forEach(id => delete store['cvdiff:' + id]);
+      ensureData(); render();
+    },
+    'set-default-variant': async (el) => {
+      const res = await api('/cv/versions/' + encodeURIComponent(el.dataset.id) + '/set_default', {
+        method: 'POST', body: JSON.stringify({}),
+      });
+      if (!res.ok) return toast('Could not set default: ' + res.error);
+      toast('Default variant updated.');
+      delete store['cvVersions']; ensureData(); render();
+    },
+    'toggle-variant-diff': (el) => {
+      const id = el.dataset.id;
+      state.expandedDiff[id] = !state.expandedDiff[id];
+      render();
+    },
+    'pick-variant': (el) => {
+      state.reviewPick[el.dataset.id] = el.dataset.variant;
+      render();
     },
   };
 
-  async function decideReview(id, kind) {
-    const res = await api('/reviews/' + encodeURIComponent(id) + '/' + kind, {
+  /* ================= chat plumbing ================= */
+  async function sendChat() {
+    const input = $('#chat-input');
+    const text = ((input && input.value) || state.chatDraft || '').trim();
+    if (!text || state.chatSending) return;
+
+    // Start a conversation on the first message rather than up front, so an
+    // opened-and-abandoned chat never leaves an empty row behind.
+    if (!state.chatConv) {
+      const made = await api('/chat/conversations', {
+        method: 'POST', body: JSON.stringify({}),
+      });
+      if (!made.ok) { state.chatError = 'Could not start a chat: ' + made.error; render(); return; }
+      state.chatConv = made.data.id;
+      slot('chat:' + made.data.id).data = {
+        conversation: made.data, messages: [], suggestions: [],
+      };
+    }
+
+    const id = state.chatConv;
+    const thread = slot('chat:' + id);
+    if (!thread.data) thread.data = { conversation: null, messages: [], suggestions: [] };
+
+    // Echo the user's own words immediately. This is not fabricated content —
+    // it is what they just typed — and waiting up to 90s to see it would make
+    // the app feel broken. Pokie's side is never optimistic.
+    thread.data.messages = thread.data.messages.concat([{
+      id: 'pending-' + Date.now(), role: 'user', text, blocks: [],
+      status: 'complete',
+    }]);
+    state.chatDraft = ''; state.chatError = null; state.chatSending = true;
+    render();
+
+    const res = await api('/chat/conversations/' + encodeURIComponent(id) + '/messages', {
+      method: 'POST', body: JSON.stringify({ text }),
+    });
+    state.chatSending = false;
+
+    if (!res.ok) {
+      // Put the words back in the box so nothing is lost, and say what failed.
+      state.chatDraft = text;
+      state.chatError = res.error;
+      thread.data.messages = thread.data.messages.filter(
+        m => String(m.id).indexOf('pending-') !== 0);
+      render();
+      return;
+    }
+
+    // Re-read the transcript rather than splicing the response in: the turn may
+    // have changed things elsewhere, and the server's copy is the real one.
+    // The cached slots are REFRESHED, not deleted — deleting them flips the
+    // whole screen to a loading state for the length of a round-trip, so every
+    // message would blank the conversation you are reading.
+    await loadChatThread(id, true);
+    loadChat();
+    // A turn can dismiss jobs, change settings or start a sweep, so every
+    // cached screen is now suspect. Drop them all; they refetch on visit.
+    ['overview', 'jobs', 'reviews', 'applications', 'memory', 'sources',
+     'history', 'vault', 'settings'].forEach(k => { delete store[k]; });
+    render();
+  }
+
+  async function resolveChatAction(blockId, kind) {
+    const id = state.chatConv;
+    if (!id) return;
+    state.chatSending = true; render();
+    const res = await api('/chat/conversations/' + encodeURIComponent(id)
+      + '/' + kind + '/' + encodeURIComponent(blockId), {
       method: 'POST', body: JSON.stringify({}),
+    });
+    state.chatSending = false;
+    if (!res.ok) {
+      state.chatError = res.error;
+      render();
+      return;
+    }
+    toast(kind === 'confirm' ? 'Done.' : 'Cancelled.');
+    await loadChatThread(id, true);
+    ['overview', 'jobs', 'reviews', 'applications', 'memory', 'sources',
+     'history', 'vault', 'settings'].forEach(k => { delete store[k]; });
+    render();
+  }
+
+  async function decideReview(id, kind, body) {
+    const res = await api('/reviews/' + encodeURIComponent(id) + '/' + kind, {
+      method: 'POST', body: JSON.stringify(body || {}),
     });
     if (!res.ok) return toast('That did not go through: ' + res.error);
     toast(kind === 'approve' ? 'Approved.' : 'Rejected.');
-    delete store['reviews']; delete store['review:' + id]; delete store['home'];
-    delete store['applications'];
+    delete state.reviewPick[id];
+    delete store['reviews']; delete store['review:' + id]; delete store['overview'];
+    delete store['applications']; delete store['cvVersions'];
     ensureData(); render();
   }
 
   async function pollSweep() {
     clearInterval(state.sweepPoll);
     if (!state.sweepId) return;
+    let announced = false, waitedForScoring = 0;
     const tick = async () => {
       const res = await api('/sweeps/' + encodeURIComponent(state.sweepId) + '/status');
       const s = slot('sweep');
       if (!res.ok) { s.error = res.error; clearInterval(state.sweepPoll); render(); return; }
       s.data = res.data; s.error = null;
-      if (res.data.status === 'completed' || res.data.status === 'failed') {
+      const terminal = res.data.status === 'completed' || res.data.status === 'failed';
+      if (terminal && !announced) {
+        announced = true;
+        delete store['jobs']; delete store['overview'];
+        toast('Sweep ' + res.data.status + '.');
+      }
+      // A sweep scores what it found AFTER writing its terminal status, so
+      // stopping the instant the status flips would miss the scoring block.
+      // Keep polling for it, but bounded: a sweep whose scoring record never
+      // lands (process restart) must not poll forever.
+      if (terminal && (res.data.scoring || waitedForScoring >= 8)) {
         clearInterval(state.sweepPoll);
         state.sweepPoll = null;
-        delete store['jobs']; delete store['home'];
-        toast('Sweep ' + res.data.status + '.');
+      } else if (terminal) {
+        waitedForScoring += 1;
       }
       if (state.screen === 'run') render();
     };
     await tick();
     state.sweepPoll = setInterval(tick, 2500);
+  }
+
+  // Backlog scoring has no WS event (it writes the same job rows the feed
+  // already serves), so the run screen polls its status endpoint the same way
+  // it polls a sweep.
+  async function pollBacklog() {
+    clearInterval(state.backlogPoll);
+    const tick = async () => {
+      const res = await api('/jobs/score_backlog/status');
+      const s = slot('backlog');
+      if (!res.ok) {
+        s.error = res.error;
+        clearInterval(state.backlogPoll); state.backlogPoll = null;
+        render(); return;
+      }
+      s.data = res.data; s.error = null;
+      if (!res.data.running) {
+        clearInterval(state.backlogPoll);
+        state.backlogPoll = null;
+        // Scores changed: the feed and the home stats are now stale.
+        delete store['jobs']; delete store['overview'];
+        toast(res.data.skipped_reason
+          ? 'Scoring stopped: ' + res.data.skipped_reason
+          : 'Scoring finished — ' + res.data.scored + ' scored.');
+        if (state.screen === 'run') ensureData();
+      }
+      if (state.screen === 'run') render();
+    };
+    await tick();
+    const now = slot('backlog').data;
+    if (now && now.running) state.backlogPoll = setInterval(tick, 2500);
   }
 
   document.addEventListener('click', (e) => {
@@ -1328,25 +2145,47 @@
     fn(el);
   });
 
+  // The composer is a textarea, not a form: Enter sends, Shift+Enter breaks a
+  // line. Bound on document because the element is destroyed and recreated by
+  // every render.
+  document.addEventListener('keydown', (e) => {
+    if (!e.target || e.target.id !== 'chat-input') return;
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChat();
+    }
+  });
+  document.addEventListener('input', (e) => {
+    if (!e.target || e.target.id !== 'chat-input') return;
+    state.chatDraft = e.target.value;
+    autoGrow(e.target);
+  });
+
   window.addEventListener('hashchange', () => {
     const h = location.hash.replace('#', '');
-    if (h && h !== state.screen) go(h);
+    // An empty hash is the home screen, which is the chat.
+    const screen = h || 'chat';
+    if (screen !== state.screen) go(screen);
   });
 
   /* ================= boot ================= */
   async function boot() {
     if (!tokens.get()) { showLogin(); return; }
     const h = location.hash.replace('#', '');
-    state.screen = SCREENS[h] ? h : 'home';
+    // No hash, or an unknown one, lands on the chat — it is the home screen.
+    state.screen = SCREENS[h] ? h : 'chat';
     render();
     ensureData();
     // Badge counts and the signed-in identity the rail shows before you visit
     // those screens.
-    const [rev, cq, props, prof] = await Promise.all([
+    const [rev, cq, props, prof, esc] = await Promise.all([
       api('/reviews'), api('/applications/confirm_queue'), api('/memory/proposals'),
-      api('/vault/profile'),
+      api('/vault/profile'), api('/escalations?status=pending'),
     ]);
-    if (rev.ok) badges.reviews = (rev.data.items || []).filter(r => r.status === 'pending').length;
+    // Needs you = pending drafts + pending questions (see setNeedsYouBadge).
+    setNeedsYouBadge(
+      rev.ok ? (rev.data.items || []).filter(r => r.status === 'pending').length : 0,
+      esc.ok ? (esc.data.items || []).length : 0);
     if (cq.ok) badges.confirm = (cq.data.items || []).length;
     if (props.ok) badges.proposals = (props.data.items || []).filter(p => p.status === 'pending').length;
     if (prof.ok && prof.data) {
