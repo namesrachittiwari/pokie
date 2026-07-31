@@ -183,7 +183,9 @@ button:focus-visible, input:focus-visible { outline:2px solid var(--pink); outli
 .perm-row { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:15px 22px; border-top:1px solid var(--hair); }
 .perm-row .t { font-size:16px; }
 .seg { display:flex; gap:4px; background:var(--black); border:1px solid rgba(255,255,255,.12); border-radius:999px; padding:4px; flex-shrink:0; }
-.seg span { display:flex; align-items:center; justify-content:center; width:72px; height:32px; font-size:13px; font-weight:600; border-radius:999px; cursor:pointer; color:var(--t3); }
+/* min-width, not width: the labels come from the contract enum and are longer
+   than the handoff's three-letter ones. */
+.seg span { display:flex; align-items:center; justify-content:center; min-width:72px; padding:0 14px; height:32px; font-size:13px; font-weight:600; border-radius:999px; cursor:pointer; color:var(--t3); white-space:nowrap; }
 .ob-composer { flex-shrink:0; display:flex; justify-content:center; padding:0 40px 28px; }
 .ob-composer .composer { width:100%; max-width:660px; }
 .start-btn { font-size:14px; font-weight:600; padding:12px 24px; border-radius:999px; background:var(--green); color:#070707; cursor:pointer; white-space:nowrap; }
@@ -263,7 +265,9 @@ button:focus-visible, input:focus-visible { outline:2px solid var(--pink); outli
   border-top:1px solid rgba(255,255,255,.08); padding:16px 34px;
   display:flex; align-items:center; gap:10px; flex-wrap:wrap;
 }
-.jd-actions .note { flex:1; text-align:right; font-size:13px; color:var(--t3); }
+/* Wraps to its own line rather than being squeezed into a sliver beside the
+   buttons on a narrow detail pane. */
+.jd-actions .note { flex:1 1 220px; min-width:180px; text-align:right; font-size:13px; color:var(--t3); }
 
 /* ============ Run ============ */
 .run { padding:32px 40px 120px; display:grid; grid-template-columns:1fr 330px; gap:24px; align-items:start; }
@@ -378,8 +382,9 @@ button:focus-visible, input:focus-visible { outline:2px solid var(--pink); outli
 .hist-row:hover { background:var(--panel-hov); }
 .hist-row .tm { font-size:13px; color:var(--t3); font-variant-numeric:tabular-nums; }
 .actor { font-size:12px; font-weight:600; padding:5px 12px; border-radius:999px; text-align:center; }
-.hist-row .tx { font-size:16px; }
-.hist-row .dt { font-size:13px; color:var(--t3); }
+/* Both live in one grid cell, so they must stack rather than run together. */
+.hist-row .tx { font-size:16px; display:block; }
+.hist-row .dt { font-size:13px; color:var(--t3); display:block; }
 .hist-act { font-size:13px; font-weight:600; padding:8px 16px; border-radius:999px; cursor:pointer; border:1px solid; white-space:nowrap; }
 
 /* ============ Mobile brief ============ */
@@ -429,8 +434,79 @@ button:focus-visible, input:focus-visible { outline:2px solid var(--pink); outli
 #toast.show { opacity:1; transform:translate(-50%, 0); pointer-events:auto; }
 #toast button { color:var(--pink); font-weight:600; font-size:13px; }
 
+/* ============ Live app additions ============ */
+.pad { padding:32px 40px 120px; display:flex; flex-direction:column; gap:20px; }
+.dim { color:var(--t3); }
+
+/* loading / error / empty — one honest block, never fake content */
+.pk-state {
+  display:flex; align-items:center; gap:14px; justify-content:space-between;
+  background:var(--panel); border:1px solid var(--border); border-radius:22px;
+  padding:22px 24px; color:var(--t2); font-size:15px;
+}
+.pk-state b { color:#fff; font-weight:600; }
+.pk-state .s { font-size:13px; color:var(--t3); margin-top:4px; line-height:1.5; }
+.pk-state.err { border-color:rgba(235,107,168,.32); }
+
+/* home stat tiles */
+.stat-grid { display:grid; grid-template-columns:repeat(6,1fr); gap:12px; }
+.stat { background:var(--panel); border:1px solid var(--border); border-radius:20px; padding:16px 18px; display:flex; flex-direction:column; gap:6px; min-width:0; }
+.stat .l { font-size:12px; letter-spacing:.6px; text-transform:uppercase; color:var(--t3); }
+.stat .v { font-size:26px; font-weight:600; line-height:1.1; }
+
+/* call-out banners */
+.banner { border-radius:22px; padding:18px 22px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; border:1px solid; }
+.banner .t { font-size:16px; font-weight:600; flex:1; min-width:200px; }
+.banner .s { font-size:13px; color:var(--t2); flex-basis:100%; order:3; line-height:1.5; }
+.banner.pink { background:rgba(235,107,168,.09); border-color:rgba(235,107,168,.32); }
+.banner.yellow { background:rgba(236,226,46,.08); border-color:rgba(236,226,46,.3); }
+.banner.grey { background:var(--panel); border-color:var(--border); }
+.banner .pill.outline { padding:9px 18px; font-size:14px; }
+
+/* compact job row used on Home */
+.mini-job { display:flex; align-items:center; gap:12px; width:100%; padding:10px 0; border-bottom:1px solid var(--hair); cursor:pointer; }
+.mini-job:last-child { border-bottom:0; }
+.mini-job:hover .mj-role { color:var(--pink); }
+.mj-col { display:flex; flex-direction:column; gap:2px; flex:1; min-width:0; text-align:left; }
+.mj-role { font-size:15px; font-weight:500; }
+.mj-co { font-size:12px; color:var(--t3); }
+
+/* pipeline board */
+.board { display:flex; gap:12px; overflow-x:auto; padding-bottom:6px; }
+.board-col { flex:0 0 210px; background:var(--panel); border:1px solid var(--border); border-radius:20px; padding:14px; display:flex; flex-direction:column; gap:10px; }
+.bc-head { display:flex; justify-content:space-between; font-size:13px; color:var(--t2); font-weight:600; }
+.bc-head .n { color:var(--t3); }
+.bc-card { background:var(--black); border:1px solid var(--hair); border-radius:14px; padding:11px 13px; }
+.bc-card .t { font-size:14px; font-weight:500; }
+.bc-card .s { font-size:12px; color:var(--t3); }
+
+/* key/value summary (filled form fields) */
+.kv { display:flex; flex-direction:column; gap:1px; background:var(--hair); border-radius:14px; overflow:hidden; }
+.kv-row { display:flex; justify-content:space-between; gap:16px; background:var(--panel); padding:11px 16px; font-size:14px; }
+.kv-row .k { color:var(--t3); }
+
+/* three-column list rows (sources, vault, more) */
+.hist-row.r3 { grid-template-columns:110px 1fr auto; width:100%; }
+.more-row { cursor:pointer; }
+.more-row:hover { background:var(--panel-hov); }
+
+.mem-card .lb { font-size:11px; letter-spacing:1px; text-transform:uppercase; color:var(--t3); }
+.mem-card.gap { border-color:rgba(235,107,168,.34); }
+.teach-input.num { width:110px; flex-shrink:0; }
+.mob-back { display:none; }
+
+/* login overlay */
+#pk-login { position:fixed; inset:0; z-index:80; background:rgba(7,7,7,.92); backdrop-filter:blur(10px); display:flex; align-items:center; justify-content:center; padding:24px; }
+.pk-login-card { width:100%; max-width:360px; background:var(--panel); border:1px solid var(--border); border-radius:26px; padding:28px; display:flex; flex-direction:column; gap:12px; }
+.pk-login-top { display:flex; align-items:center; gap:10px; font-size:19px; font-weight:600; }
+.pk-login-sub { font-size:14px; color:var(--t3); margin-bottom:4px; }
+.pk-login-msg { font-size:13px; color:var(--yellow); }
+#pk-login input { background:var(--black); border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:13px 15px; font-size:15px; color:#fff; }
+.pk-login-err { font-size:13px; color:var(--pink); min-height:18px; }
+
 /* ============ Responsive ============ */
 @media (max-width: 1180px) {
+  .stat-grid { grid-template-columns:repeat(3,1fr); }
   .run, .approve { grid-template-columns:1fr; }
   .cvlab { grid-template-columns:1fr; }
   .mem-grid { grid-template-columns:repeat(2,1fr); }
@@ -454,7 +530,15 @@ button:focus-visible, input:focus-visible { outline:2px solid var(--pink); outli
   .ob-side { display:none; }
   .chat-top, .chat-centre, .chat-foot, .thread-scroll, .thread-composer, .ob-head, .ob-scroll, .ob-composer { padding-left:18px; padding-right:18px; }
   .run, .approve, .cvlab, .memory, .history { padding:20px 18px 40px; }
+  .pad { padding:20px 18px 40px; }
+  .stat-grid { grid-template-columns:repeat(2,1fr); }
+  .stat .v { font-size:22px; }
+  .banner { padding:16px 18px; }
+  .hist-row.r3 { grid-template-columns:86px 1fr auto; }
+  .board-col { flex-basis:172px; }
   .mem-grid { grid-template-columns:1fr; }
+  /* Jobs is a list -> detail push on phones; this is the way back. */
+  .jobs.show-detail .mob-back { display:inline-flex; align-self:flex-start; padding:8px 16px; font-size:14px; }
   .jobs-head { padding:16px 18px 12px; }
   .jobs-body { grid-template-columns:1fr; }
   .job-detail { display:none; }
@@ -479,6 +563,10 @@ button:focus-visible, input:focus-visible { outline:2px solid var(--pink); outli
   </div>
   <nav id="tabbar" aria-label="Tabs"></nav>
   <div id="toast" role="status"></div>
-  <script src="pokie.js"></script>
+  <!-- build-marker: pokie-live-3 -->
+  <!-- One file, one source of truth. Every screen renders from the API; there
+       is no prototype view model to fall back to, so nothing can look live
+       while being fake. -->
+  <script src="app.js"></script>
 </body>
 </html>
