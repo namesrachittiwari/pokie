@@ -180,10 +180,18 @@
     chatConv: null,        // active conversation id
     chatSending: false,    // a turn is in flight -> typing indicator
     chatDraft: '',         // composer text, preserved across re-renders
-    chatMenu: false,       // mobile conversation dropdown open
+    // One flag drives the conversation list everywhere it appears: the
+    // desktop sidebar panel AND the mobile header dropdown are the same
+    // control conceptually, just rendered in two spots. Collapsed by default.
+    chatListOpen: false,
     chatError: null,       // last send failure, shown in place
     reviewPick: {},   // review id -> chosen cv_version_id (not yet submitted)
     expandedDiff: {}, // cv_version_id -> bool, CV Lab diff-vs-default toggle
+    // Role/keyword filter chip row (chat + vault). Collapsed by default;
+    // roleFilterEdit is the working copy while the editor is open, discarded
+    // on collapse or after a successful save (which re-fetches instead).
+    roleFiltersOpen: false,
+    roleFilterEdit: null,
   };
   // Per-screen cache: { loading, error, data }
   const store = {};
@@ -555,6 +563,24 @@
     s.loading = false;
     if (!res.ok) { s.error = res.error; s.data = null; }
     else s.data = res.data;
+    render();
+  }
+
+  // Shared by the chat screen and the Vault: what Pokie is currently hunting
+  // for. Backend may not have shipped this yet — a 404 (or any other error)
+  // is kept in slot.error and shown honestly, never faked into an empty list.
+  async function loadRoleFilters() {
+    const s = slot('roleFilters');
+    if (s.loading) return;
+    s.loading = true; s.error = null;
+    const res = await api('/vault/role_filters');
+    s.loading = false;
+    if (!res.ok) { s.error = res.error; s.data = null; render(); return; }
+    s.data = {
+      target_titles: res.data.target_titles || [],
+      exclude_keywords: res.data.exclude_keywords || [],
+      source: res.data.source || null,
+    };
     render();
   }
 
@@ -1225,6 +1251,7 @@
     return `<div class="pad">
       ${pageHead('Vault', 'The facts Pokie fills forms with. Blanks block applications.',
         `<button class="pill primary" style="background:${PINK}" data-act="vault-save">Save changes</button>`)}
+      ${roleFiltersRow(true)}
       ${d.gaps.filter(g => g.blocking).length ? `<div class="banner pink">
         <div class="t">${d.gaps.filter(g => g.blocking).length} blocking gap(s)</div>
         <div class="s">Pokie will not submit a form while these are empty.</div>
@@ -1511,21 +1538,155 @@
     </div>`;
   }
 
-  function chatConvList() {
-    const s = slot('chat');
-    const convs = (s.data && s.data.convs) || [];
+  // The list body — "+ New chat" pinned at the top, then every conversation —
+  // is identical wherever it shows up: the desktop sidebar panel and the
+  // mobile header dropdown are the same dropdown conceptually, just mounted
+  // in two different spots, so they share this one render function.
+  function chatConvListBody(convs) {
+    return `<div class="conv-list">
+      <button class="conv-item" data-act="chat-new"
+        style="flex-direction:row;align-items:center;gap:8px;font-weight:600;color:${PINK}">
+        <span aria-hidden="true">+</span><span>New chat</span>
+      </button>
+      ${convs.length ? convs.map(c => `
+        <button class="conv-item ${c.id === state.chatConv ? 'on' : ''}" data-act="chat-open" data-id="${esc(c.id)}">
+          <span class="ct">${esc(convLabel(c))}</span>
+          <span class="cm">${esc(ago(c.last_message_at || c.created_at))} · ${c.message_count} msg</span>
+        </button>`).join('')
+        : `<div class="conv-empty">No other chats yet.</div>`}
+    </div>`;
+  }
+
+  // Desktop sidebar panel. Collapsed by default — a slim rail with the
+  // active chat's title and a chat count, plus its own "+ New" that never
+  // requires expanding the list. Expanding it reclaims nothing from the
+  // thread; collapsing it (the default) hands that width back to the thread.
+  function chatConvList(convs, active) {
+    const count = convs.length;
+    const countLabel = count + ' chat' + (count === 1 ? '' : 's');
+    if (!state.chatListOpen) {
+      return `<div class="conv-col">
+        <div style="display:flex;flex-direction:column;gap:8px;padding:16px 10px;">
+          <button class="mini-pill" data-act="chat-new" title="New chat"
+            style="width:100%;justify-content:center;padding:8px 4px;font-size:12px;">+ New</button>
+          <button data-act="chat-list-toggle" title="Show all chats"
+            style="display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;
+                   background:none;border:0;color:inherit;font:inherit;text-align:left;cursor:pointer;">
+            <span class="ct" style="font-size:13px;font-weight:500;max-width:100%;overflow:hidden;
+              text-overflow:ellipsis;white-space:nowrap;">${esc(active ? convLabel(active) : 'New chat')}</span>
+            <span class="cm" style="font-size:11px;">${countLabel} ⌄</span>
+          </button>
+        </div>
+      </div>`;
+    }
     return `<div class="conv-col">
       <div class="conv-head">
-        <span class="eyebrow">Chats</span>
-        <button class="mini-pill" data-act="chat-new">+ New</button>
+        <span class="eyebrow">${countLabel}</span>
+        <button class="mini-pill" data-act="chat-list-toggle" title="Collapse">Collapse ⌃</button>
       </div>
-      <div class="conv-list">
-        ${convs.length ? convs.map(c => `
-          <button class="conv-item ${c.id === state.chatConv ? 'on' : ''}" data-act="chat-open" data-id="${esc(c.id)}">
-            <span class="ct">${esc(convLabel(c))}</span>
-            <span class="cm">${esc(ago(c.last_message_at || c.created_at))} · ${c.message_count} msg</span>
-          </button>`).join('')
-          : `<div class="conv-empty">No chats yet.</div>`}
+      ${chatConvListBody(convs)}
+    </div>`;
+  }
+
+  /* ---- role filters (chat + vault) ----
+   * GET/PUT /vault/role_filters. May 404 until the backend ships it — every
+   * path here degrades to an honest inline message, never a blank or fake
+   * row. Collapsed by default; the same render function is shared between
+   * screenChat() and screenVault() since it is the same data either place. */
+  const rfChip = (text, act, i) => `
+    <span class="tag" style="display:inline-flex;align-items:center;gap:7px;color:var(--t2);
+      border-color:var(--bstrong);background:var(--panel-hov);">
+      <span>${esc(text)}</span>
+      <button data-act="${act}" data-i="${i}" title="Remove ${esc(text)}" aria-label="Remove ${esc(text)}"
+        style="background:none;border:0;color:inherit;font:inherit;font-size:14px;line-height:1;
+        cursor:pointer;padding:0;">×</button>
+    </span>`;
+
+  function roleFiltersSummary(d) {
+    const titles = d.target_titles || [], kws = d.exclude_keywords || [];
+    if (!titles.length && !kws.length) return 'No role filters set yet.';
+    let head = titles.length
+      ? 'Hunting: ' + (titles.length <= 2 ? titles.join(', ')
+          : titles.slice(0, 2).join(', ') + ' +' + (titles.length - 2))
+      : 'Hunting: anything';
+    if (kws.length) {
+      head += ' · excluding ' + (kws.length <= 3 ? kws.join(', ')
+        : kws.slice(0, 3).join(', ') + ' +' + (kws.length - 3));
+    }
+    return head;
+  }
+
+  // embedded=true (Vault) drops the edge-to-edge chat-top-style bar in favour
+  // of a normal rounded card, since it sits inside .pad's own padded column
+  // rather than flush under a full-bleed header. Same slot, same state, same
+  // actions either way.
+  function roleFiltersRow(embedded) {
+    const outerStyle = embedded
+      ? 'border:1px solid var(--border);border-radius:22px;background:var(--panel);'
+      : `border-bottom:1px solid var(--hair);background:var(--panel);`;
+    const pad = embedded ? '20px' : (window.innerWidth > 900 ? '40px' : '18px');
+    const s = slot('roleFilters');
+    if (s.error) {
+      return `<div style="padding:12px ${pad};${outerStyle}min-width:0;display:flex;
+        align-items:center;justify-content:space-between;gap:12px;font-size:13px;color:var(--t3);">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">Role filters unavailable — ${esc(s.error)}</span>
+        <button class="pill outline" style="flex-shrink:0;padding:7px 16px;font-size:13px;" data-act="rf-retry">Retry</button>
+      </div>`;
+    }
+    if (!s.data) {
+      return `<div style="padding:12px ${pad};${outerStyle}min-width:0;font-size:13px;color:var(--t3);">
+        Loading role filters…
+      </div>`;
+    }
+    const d = s.data;
+    if (!state.roleFiltersOpen) {
+      return `<button data-act="rf-toggle" title="Edit role filters"
+        style="display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;
+        min-width:0;padding:10px ${pad};border:0;${outerStyle}
+        color:var(--t2);font:inherit;font-size:13px;cursor:pointer;text-align:left;">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;">${esc(roleFiltersSummary(d))}</span>
+        <span style="flex-shrink:0;color:var(--t3);">Edit ⌄</span>
+      </button>`;
+    }
+    // Lazy-init the working draft the same way cvVariantRow() lazy-loads its
+    // diff: a side effect during render, matching this file's own pattern.
+    if (!state.roleFilterEdit) {
+      state.roleFilterEdit = {
+        target_titles: [...d.target_titles], exclude_keywords: [...d.exclude_keywords],
+      };
+    }
+    const draft = state.roleFilterEdit;
+    return `<div style="padding:14px ${pad};${outerStyle}min-width:0;
+      display:flex;flex-direction:column;gap:14px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <span class="eyebrow">Role filters${d.source ? ' · ' + esc(d.source) : ''}</span>
+        <button class="mini-pill" data-act="rf-toggle" title="Collapse">Collapse ⌃</button>
+      </div>
+      <div>
+        <div class="eyebrow" style="margin-bottom:8px;">Target titles</div>
+        <div class="chip-row" style="justify-content:flex-start;">
+          ${draft.target_titles.length ? draft.target_titles.map((t, i) => rfChip(t, 'rf-remove-title', i)).join('')
+            : '<span class="dim" style="font-size:13px;">None set — Pokie hunts anything.</span>'}
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <input id="rf-title-in" class="teach-input" placeholder="Add a target title…" style="flex:1;">
+          <button class="mini-pill" data-act="rf-add-title">Add</button>
+        </div>
+      </div>
+      <div>
+        <div class="eyebrow" style="margin-bottom:8px;">Exclude keywords</div>
+        <div class="chip-row" style="justify-content:flex-start;">
+          ${draft.exclude_keywords.length ? draft.exclude_keywords.map((t, i) => rfChip(t, 'rf-remove-kw', i)).join('')
+            : '<span class="dim" style="font-size:13px;">None set.</span>'}
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <input id="rf-kw-in" class="teach-input" placeholder="Add a keyword to exclude…" style="flex:1;">
+          <button class="mini-pill" data-act="rf-add-kw">Add</button>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;">
+        <button class="mini-pill" style="background:${PINK};color:#070707;font-weight:600;border-color:${PINK};"
+          data-act="rf-save">Save</button>
       </div>
     </div>`;
   }
@@ -1545,13 +1706,32 @@
     if (!state.chatConv) {
       // Cold start: greeting + composer, centred. Nothing is faked here — there
       // genuinely is no conversation yet.
-      body = `<div class="chat-centre">
-        <div class="chat-greet">
-          ${mark(46)}
-          <div class="h">What should I do next?</div>
-          <div class="s">I can read anything and change anything. Ask, or just tell me.</div>
+      //
+      // Root cause of the mobile "won't scroll" bug: .chat-centre used
+      // `justify-content:center` with no overflow-y/min-height override. A
+      // flex item centred that way overflows equally above AND below its own
+      // box once its content (greeting + composer + a full suggestion row,
+      // or the same content squeezed by an on-screen keyboard) is taller
+      // than the space available — and the half that bleeds ABOVE the box's
+      // nominal top edge is not part of any container's normal scrollable
+      // range, so it renders clipped and no amount of scrolling reaches it.
+      // #main (the real scroll container, overflow-y:auto) works fine for
+      // downward overflow — verified in a real browser at 390x844 shrunk to
+      // 390x500 — so the fix is to stop the content from bleeding upward at
+      // all: swap `justify-content:center` for the `margin:auto` centring
+      // trick on an inner wrapper. Auto margins centre exactly like
+      // `justify-content:center` while there is spare room, then collapse to
+      // 0 (not negative) once content overflows, so the overflow only ever
+      // grows downward — in-flow, and fully reachable by #main's scroll.
+      body = `<div class="chat-centre" style="justify-content:flex-start;overflow-y:auto;min-height:0;">
+        <div style="margin:auto 0;display:flex;flex-direction:column;align-items:center;gap:34px;width:100%;">
+          <div class="chat-greet">
+            ${mark(46)}
+            <div class="h">What should I do next?</div>
+            <div class="s">I can read anything and change anything. Ask, or just tell me.</div>
+          </div>
+          <div class="chat-composer-wrap">${chatComposer(suggestions)}</div>
         </div>
-        <div class="chat-composer-wrap">${chatComposer(suggestions)}</div>
       </div>`;
     } else if (thread && thread.loading && !thread.data) {
       body = `<div class="pad">${loadingHTML('this chat')}</div>`;
@@ -1571,26 +1751,31 @@
         </div>`;
     }
 
-    return `<div class="chat-layout">
-      ${chatConvList()}
-      <div class="chat-shell">
-        <div class="chat-top hair">
-          <button class="conv-trigger" data-act="chat-menu">
+    // Desktop (>900px) is the only viewport where the sidebar column and the
+    // header dropdown are ever both eligible to show at once, so it is the
+    // only place a JS-computed width matters — below 900px the stylesheet
+    // already hides .conv-col and shows .conv-trigger unconditionally.
+    const desktopWide = window.innerWidth > 900;
+    const layoutStyle = desktopWide
+      ? ` style="grid-template-columns:${state.chatListOpen ? '250px' : '130px'} 1fr;"`
+      : '';
+
+    return `<div class="chat-layout"${layoutStyle}>
+      ${chatConvList(convs, active)}
+      <div class="chat-shell" style="min-width:0;">
+        <div class="chat-top hair" style="min-width:0;">
+          ${desktopWide ? '' : `<button class="mini-pill" data-act="chat-new" title="New chat"
+            style="flex-shrink:0;padding:7px 12px;font-size:12px;">+ New</button>`}
+          <button class="conv-trigger" data-act="chat-list-toggle" style="min-width:0;flex:1;">
             <span class="ct">${esc(active ? convLabel(active) : 'New chat')}</span>
-            <span class="cv">⌄</span>
+            <span class="cv">${state.chatListOpen ? '⌃' : '⌄'}</span>
           </button>
-          <div class="chat-status">
-            <span class="live-dot"></span><span>Pokie is listening</span>
+          <div class="chat-status" style="flex-shrink:0;">
+            <span class="live-dot"></span>${window.innerWidth > 480 ? '<span>Pokie is listening</span>' : ''}
           </div>
         </div>
-        ${state.chatMenu ? `<div class="conv-menu">
-          <button class="conv-item" data-act="chat-new">+ New chat</button>
-          ${convs.map(c => `
-            <button class="conv-item ${c.id === state.chatConv ? 'on' : ''}" data-act="chat-open" data-id="${esc(c.id)}">
-              <span class="ct">${esc(convLabel(c))}</span>
-              <span class="cm">${esc(ago(c.last_message_at || c.created_at))}</span>
-            </button>`).join('')}
-        </div>` : ''}
+        ${state.chatListOpen && !desktopWide ? `<div class="conv-menu" style="min-width:0;">${chatConvListBody(convs)}</div>` : ''}
+        ${roleFiltersRow(false)}
         ${body}
       </div>
     </div>`;
@@ -1607,7 +1792,10 @@
   /* ================= data needed per screen ================= */
   function ensureData() {
     switch (state.screen) {
-      case 'chat': if (!slot('chat').data && !slot('chat').loading && !slot('chat').error) loadChat(); break;
+      case 'chat':
+        if (!slot('chat').data && !slot('chat').loading && !slot('chat').error) loadChat();
+        if (!slot('roleFilters').data && !slot('roleFilters').loading && !slot('roleFilters').error) loadRoleFilters();
+        break;
       case 'overview': if (!slot('overview').data && !slot('overview').loading && !slot('overview').error) loadOverview(); break;
       case 'jobs': if (!slot('jobs').data && !slot('jobs').loading && !slot('jobs').error) loadJobs(); break;
       case 'run':
@@ -1630,7 +1818,10 @@
       case 'memory': if (!slot('memory').data && !slot('memory').loading && !slot('memory').error) loadMemory(); break;
       case 'sources': if (!slot('sources').data && !slot('sources').loading && !slot('sources').error) loadSources(); break;
       case 'history': if (!slot('history').data && !slot('history').loading && !slot('history').error) loadHistory(); break;
-      case 'vault': if (!slot('vault').data && !slot('vault').loading && !slot('vault').error) loadVault(); break;
+      case 'vault':
+        if (!slot('vault').data && !slot('vault').loading && !slot('vault').error) loadVault();
+        if (!slot('roleFilters').data && !slot('roleFilters').loading && !slot('roleFilters').error) loadRoleFilters();
+        break;
       case 'cvlab': if (!slot('cvVersions').data && !slot('cvVersions').loading && !slot('cvVersions').error) loadCvVersions(); break;
       case 'settings': if (!slot('settings').data && !slot('settings').loading && !slot('settings').error) loadSettings(); break;
     }
@@ -1656,7 +1847,13 @@
     if (input) {
       input.value = state.chatDraft;
       autoGrow(input);
-      if (!state.chatSending) input.focus();
+      // Do not steal focus (and with it, on mobile, the scroll position —
+      // focusing an input scrolls it into view) while the user has the
+      // conversation dropdown or the role-filters editor open. Either means
+      // they tapped a chevron to browse or edit something, not to type, and
+      // grabbing focus mid-browse is exactly what silently scrolled "+ New
+      // chat" off the top of the mobile dropdown.
+      if (!state.chatSending && !state.chatListOpen && !state.roleFiltersOpen) input.focus();
     }
     const scroll = $('#chat-scroll');
     if (scroll) scroll.scrollTop = scroll.scrollHeight;
@@ -1685,7 +1882,7 @@
 
     /* ---- chat ---- */
     'chat-new': async () => {
-      state.chatMenu = false;
+      state.chatListOpen = false;
       const res = await api('/chat/conversations', {
         method: 'POST', body: JSON.stringify({}),
       });
@@ -1700,17 +1897,67 @@
     },
     'chat-open': (el) => {
       state.chatConv = el.dataset.id;
-      state.chatMenu = false;
+      state.chatListOpen = false;
       state.chatError = null;
       loadChatThread(el.dataset.id);
       render();
     },
-    'chat-menu': () => { state.chatMenu = !state.chatMenu; render(); },
+    // Drives both the desktop sidebar panel and the mobile header dropdown —
+    // see chatListOpen in state.
+    'chat-list-toggle': () => { state.chatListOpen = !state.chatListOpen; render(); },
     'chat-suggest': (el) => { state.chatDraft = el.dataset.text || ''; sendChat(); },
     'chat-send': () => sendChat(),
 
     'chat-confirm': (el) => resolveChatAction(el.dataset.id, 'confirm'),
     'chat-cancel': (el) => resolveChatAction(el.dataset.id, 'reject'),
+
+    /* ---- role filters (chat + vault) ---- */
+    'rf-toggle': () => {
+      state.roleFiltersOpen = !state.roleFiltersOpen;
+      if (!state.roleFiltersOpen) state.roleFilterEdit = null;
+      render();
+    },
+    'rf-remove-title': (el) => {
+      if (!state.roleFilterEdit) return;
+      state.roleFilterEdit.target_titles.splice(parseInt(el.dataset.i, 10), 1);
+      render();
+    },
+    'rf-remove-kw': (el) => {
+      if (!state.roleFilterEdit) return;
+      state.roleFilterEdit.exclude_keywords.splice(parseInt(el.dataset.i, 10), 1);
+      render();
+    },
+    'rf-add-title': () => {
+      const input = $('#rf-title-in');
+      if (!input || !state.roleFilterEdit) return;
+      const v = input.value.trim();
+      if (!v) return;
+      state.roleFilterEdit.target_titles.push(v);
+      render();
+    },
+    'rf-add-kw': () => {
+      const input = $('#rf-kw-in');
+      if (!input || !state.roleFilterEdit) return;
+      const v = input.value.trim();
+      if (!v) return;
+      state.roleFilterEdit.exclude_keywords.push(v);
+      render();
+    },
+    'rf-save': async () => {
+      const draft = state.roleFilterEdit || { target_titles: [], exclude_keywords: [] };
+      const res = await api('/vault/role_filters', {
+        method: 'PUT',
+        body: JSON.stringify({
+          target_titles: draft.target_titles, exclude_keywords: draft.exclude_keywords,
+        }),
+      });
+      if (!res.ok) return toast('Could not save role filters: ' + res.error);
+      toast('Role filters saved.');
+      state.roleFilterEdit = null;
+      delete store['roleFilters'];
+      ensureData(); render();
+    },
+    'rf-retry': () => { delete store['roleFilters']; ensureData(); render(); },
 
     'job-filter': (el) => { state.jobFilter = el.dataset.v; state.selectedJob = null; render(); },
     'job-sort': () => { state.jobSort = state.jobSort === 'score' ? 'newest' : 'score'; render(); },
