@@ -557,7 +557,12 @@ button:focus-visible, input:focus-visible { outline:2px solid var(--pink); outli
 .chat-composer textarea:disabled { color:var(--t3); }
 .chat-composer .send-dot[disabled] { opacity:.45; cursor:default; }
 .chat-hint { font-size:12px; color:var(--t4); line-height:1.5; }
-.thread-composer { flex-direction:column; }
+/* This flips the axis of the .thread-composer flex row declared earlier, so
+   that rule's justify-content:center starts centring VERTICALLY and stops
+   centring horizontally — the composer dropped to the left edge while the
+   thread above it stayed centred, and the two visibly disagreed. Once the
+   direction is column, align-items is what centres across the width. */
+.thread-composer { flex-direction:column; align-items:center; }
 
 /* login overlay */
 #pk-login { position:fixed; inset:0; z-index:80; background:rgba(7,7,7,.92); backdrop-filter:blur(10px); display:flex; align-items:center; justify-content:center; padding:24px; }

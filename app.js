@@ -179,6 +179,8 @@
     memEdit: null,
     // chat
     chatConv: null,        // active conversation id
+    chatTypeId: null,      // id of the agent turn currently typing itself out
+    chatTypeAt: 0,         // how many characters of it are revealed
     chatSending: false,    // a turn is in flight -> typing indicator
     chatDraft: '',         // composer text, preserved across re-renders
     // One flag drives the conversation list everywhere it appears: the
@@ -1537,6 +1539,36 @@
       return `<div class="u-bubble">${mdLite(m.text || '')}</div>`;
     }
     const blocks = (m.blocks || []).map(chatBlock).join('');
+    // While this turn is typing itself out we render PLAIN text up to the
+    // revealed length, not markdown: half-parsed markdown flickers as the
+    // characters arrive. The full markdown render lands the moment it
+    // finishes. The .typing marker is deliberate — every wait in the app and
+    // in tests/e2e_chat_rig.js already treats it as "not settled yet", so the
+    // reveal is covered by those waits for free.
+    if (m.id === state.chatTypeId) {
+      // The prose is the LAST text block, not m.text — a turn is usually a
+      // tool receipt, then cards, then the sentence about them. Everything
+      // before that sentence renders normally; only the sentence types.
+      const list = m.blocks || [];
+      let lastText = -1;
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (list[i].type === 'text') { lastText = i; break; }
+      }
+      const before = list.slice(0, lastText === -1 ? list.length : lastText)
+        .map(chatBlock).join('');
+      const full = lastText === -1 ? (m.text || '')
+        : ((list[lastText].payload || {}).text || '');
+      return `<div class="a-turn">
+        <span class="a-mark">${mark(22)}</span>
+        <div class="a-body">
+          ${before}
+          <div class="a-text md"><span id="chat-typing-node">${esc(full.slice(0, state.chatTypeAt))}</span><span
+            class="typing" style="display:inline-block;width:7px;height:15px;
+            vertical-align:-2px;margin-left:2px;background:${PINK};
+            border-radius:2px;opacity:.85"></span></div>
+        </div>
+      </div>`;
+    }
     return `<div class="a-turn">
       <span class="a-mark">${mark(22)}</span>
       <div class="a-body">
@@ -1896,6 +1928,8 @@
 
   /* ================= render ================= */
   const app = () => $('#app'), mainEl = () => $('#main');
+  let typeTimer = null;
+
   function render() {
     const fn = SCREENS[state.screen] || screenChat;
     $('#rail').innerHTML = railHTML();
@@ -2357,7 +2391,63 @@
     // cached screen is now suspect. Drop them all; they refetch on visit.
     ['overview', 'jobs', 'reviews', 'applications', 'memory', 'sources',
      'history', 'vault', 'settings'].forEach(k => { delete store[k]; });
+    typeOutNewestTurn(id);
     render();
+  }
+
+  /* The reply arrives complete — the chat API is a plain POST, not a token
+   * stream, because the agent performs real writes and a stream that dies
+   * mid-flight leaves the client unable to say whether one happened. So the
+   * ChatGPT feel is produced here instead: reveal the finished text at a
+   * readable pace. It costs nothing in latency (the answer is already in
+   * hand) and it is skipped entirely for anyone who asked for less motion. */
+  function typeOutNewestTurn(convId) {
+    const thread = slot('chat:' + convId);
+    const msgs = (thread.data && thread.data.messages) || [];
+    let newest = null;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role !== 'user') { newest = msgs[i]; break; }
+    }
+    if (!newest) return;
+    // Reveal the closing sentence — the last text block, falling back to the
+    // message's own text. A turn that is only cards has no prose to type, and
+    // animating nothing would be theatre.
+    const list = newest.blocks || [];
+    let lastText = -1;
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].type === 'text') { lastText = i; break; }
+    }
+    const full = lastText === -1 ? (newest.text || '')
+      : ((list[lastText].payload || {}).text || '');
+    if (!full) return;
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    if (typeTimer) { clearInterval(typeTimer); typeTimer = null; }
+    state.chatTypeId = newest.id;
+    state.chatTypeAt = 0;
+    // Long answers must not take longer to reveal than to read — step size
+    // scales so the whole thing lands inside about a second and a half.
+    const step = Math.max(1, Math.ceil(full.length / 90));
+    typeTimer = setInterval(() => {
+      state.chatTypeAt += step;
+      const node = document.getElementById('chat-typing-node');
+      if (state.chatTypeAt >= full.length) {
+        clearInterval(typeTimer); typeTimer = null;
+        state.chatTypeId = null; state.chatTypeAt = 0;
+        render();                      // final pass renders the real markdown
+        return;
+      }
+      if (node) {
+        // Patch this one node in place rather than re-rendering the whole
+        // screen 90 times — a full render per frame drops the composer focus
+        // and makes the thread jump. textContent, not firstChild.nodeValue:
+        // at zero characters there is no text node yet.
+        node.textContent = full.slice(0, state.chatTypeAt);
+        const sc = document.getElementById('chat-scroll');
+        if (sc) sc.scrollTop = sc.scrollHeight;
+      } else {
+        render();
+      }
+    }, 16);
   }
 
   async function resolveChatAction(blockId, kind) {
