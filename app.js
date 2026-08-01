@@ -35,6 +35,7 @@
     : (SAME_ORIGIN_API ? '' : 'https://api.rachittiwari.com');
   const TOKEN_KEY = 'pokie.tokens';
   const PINK = '#EB6BA8', GREEN = '#1CE15F', BLUE = '#4791FF', YELLOW = '#ECE42E', GREY = '#9A9A9A';
+  const REDUCE_MOTION = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
   const mark = (size) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" style="display:block;flex-shrink:0"><g transform="rotate(45 12 12)"><rect x="3.6" y="3.6" width="16.8" height="16.8" rx="5.4" fill="#EB6BA8"/></g><ellipse cx="9.1" cy="12" rx="1.35" ry="2.6" fill="#fff"/><ellipse cx="14.9" cy="12" rx="1.35" ry="2.6" fill="#fff"/></svg>`;
 
@@ -311,7 +312,8 @@
             <button class="nav-item ${state.screen === it.key ? 'on' : ''}" data-act="go" data-screen="${it.key}">
               <span class="ic">${it.icon}</span><span class="lb">${it.label}</span>
               ${it.badgeKey ? badgeFor(it.badgeKey) : ''}
-            </button>`).join('')}
+            </button>
+            ${it.key === 'chat' && state.screen === 'chat' ? railChatBlock() : ''}`).join('')}
         </div>`).join('')}
       <div class="rail-spacer"></div>
       <div class="rail-user">
@@ -342,10 +344,35 @@
   const emptyHTML = (title, sub) =>
     `<div class="pk-state"><div><b>${esc(title)}</b>${sub ? `<div class="s">${esc(sub)}</div>` : ''}</div></div>`;
 
+  // Screens that actually have a store slot to refetch — every SCREENS key
+  // except 'more', which is pure navigation and loads nothing of its own.
+  const REFRESHABLE_SCREENS = new Set([
+    'chat', 'overview', 'jobs', 'run', 'approve', 'applications', 'memory',
+    'sources', 'history', 'vault', 'cvlab', 'settings',
+  ]);
+
+  // The desktop refresh control: one small icon button, same look and spot
+  // on every screen that has data to refetch. Icon-only (not a labelled
+  // pill) so it never risks pushing chat-top's or jobs-head-top's
+  // non-wrapping flex rows into horizontal overflow on a narrow screen.
+  function refreshBtn() {
+    const busy = isScreenLoading();
+    return `<button class="mini-pill" data-act="refresh" title="Refresh this screen"
+        aria-label="Refresh this screen" ${busy ? 'disabled aria-busy="true"' : ''}
+        style="display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;
+               padding:0;flex-shrink:0;${busy ? 'opacity:.55;' : ''}">
+      <span aria-hidden="true" style="display:inline-block;font-size:15px;line-height:1;
+        ${busy && !REDUCE_MOTION ? 'animation:pk-spin 1s linear infinite;' : ''}">⟳</span>
+    </button>`;
+  }
+
   function pageHead(title, sub, right) {
     return `<div class="page-head">
       <div><div class="t">${esc(title)}</div>${sub ? `<div class="s">${esc(sub)}</div>` : ''}</div>
-      ${right || ''}
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        ${right || ''}
+        ${REFRESHABLE_SCREENS.has(state.screen) ? refreshBtn() : ''}
+      </div>
     </div>`;
   }
 
@@ -730,9 +757,12 @@
               <span class="${state.jobFilter === k ? 'on' : ''}" data-act="job-filter" data-v="${k}">
                 ${titleCase(k)}<i class="ct">${counts[k]}</i></span>`).join('')}
           </div>
-          <button class="sort-pill" data-act="job-sort">
-            ${state.jobSort === 'score' ? 'Best fit' : 'Newest first'} ⌄
-          </button>
+          <div style="display:flex;align-items:center;gap:8px;">
+            ${refreshBtn()}
+            <button class="sort-pill" data-act="job-sort">
+              ${state.jobSort === 'score' ? 'Best fit' : 'Newest first'} ⌄
+            </button>
+          </div>
         </div>
       </div>
       <div class="jobs-body">
@@ -1557,34 +1587,40 @@
     </div>`;
   }
 
-  // Desktop sidebar panel. Collapsed by default — a slim rail with the
-  // active chat's title and a chat count, plus its own "+ New" that never
-  // requires expanding the list. Expanding it reclaims nothing from the
-  // thread; collapsing it (the default) hands that width back to the thread.
-  function chatConvList(convs, active) {
+  // Lives in the nav rail now, directly under the "Chat" item — see
+  // railHTML(). Visually subordinate to a nav-item: nav-title's 11px
+  // uppercase scale for the collapsed toggle's meta line, nothing here as
+  // large as a nav-item's 15px label. Collapsed by default; expanding it
+  // reuses the exact same list body as the mobile header dropdown.
+  function railChatBlock() {
+    const convs = (slot('chat').data && slot('chat').data.convs) || [];
+    const active = convs.find(c => c.id === state.chatConv) || null;
     const count = convs.length;
     const countLabel = count + ' chat' + (count === 1 ? '' : 's');
     if (!state.chatListOpen) {
-      return `<div class="conv-col">
-        <div style="display:flex;flex-direction:column;gap:8px;padding:16px 10px;">
-          <button class="mini-pill" data-act="chat-new" title="New chat"
-            style="width:100%;justify-content:center;padding:8px 4px;font-size:12px;">+ New</button>
-          <button data-act="chat-list-toggle" title="Show all chats"
-            style="display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;
-                   background:none;border:0;color:inherit;font:inherit;text-align:left;cursor:pointer;">
-            <span class="ct" style="font-size:13px;font-weight:500;max-width:100%;overflow:hidden;
-              text-overflow:ellipsis;white-space:nowrap;">${esc(active ? convLabel(active) : 'New chat')}</span>
-            <span class="cm" style="font-size:11px;">${countLabel} ⌄</span>
-          </button>
-        </div>
+      return `<div style="margin:2px 12px 8px 34px;display:flex;flex-direction:column;gap:1px;min-width:0;">
+        <button data-act="chat-new" title="New chat"
+          style="display:flex;align-items:center;gap:6px;width:100%;padding:6px 10px;border-radius:9px;
+                 background:none;border:0;color:${PINK};font:inherit;font-weight:600;font-size:12px;
+                 cursor:pointer;text-align:left;">
+          <span aria-hidden="true">+</span><span>New chat</span>
+        </button>
+        <button data-act="chat-list-toggle" title="Show all chats"
+          style="display:flex;flex-direction:column;align-items:flex-start;gap:1px;width:100%;min-width:0;
+                 padding:6px 10px;border-radius:9px;background:none;border:0;color:inherit;font:inherit;
+                 text-align:left;cursor:pointer;">
+          <span style="font-size:12.5px;font-weight:500;color:var(--t2);max-width:100%;overflow:hidden;
+            text-overflow:ellipsis;white-space:nowrap;">${esc(active ? convLabel(active) : 'New chat')}</span>
+          <span style="font-size:11px;color:var(--t3);">${countLabel} ⌄</span>
+        </button>
       </div>`;
     }
-    return `<div class="conv-col">
-      <div class="conv-head">
-        <span class="eyebrow">${countLabel}</span>
-        <button class="mini-pill" data-act="chat-list-toggle" title="Collapse">Collapse ⌃</button>
+    return `<div style="margin:2px 12px 8px 34px;display:flex;flex-direction:column;gap:4px;min-width:0;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 10px;">
+        <span class="nav-title" style="padding:0;">${countLabel}</span>
+        <button class="mini-pill" data-act="chat-list-toggle" title="Collapse" style="padding:4px 10px;font-size:11px;">Collapse ⌃</button>
       </div>
-      ${chatConvListBody(convs)}
+      <div style="max-height:38vh;overflow-y:auto;">${chatConvListBody(convs)}</div>
     </div>`;
   }
 
@@ -1751,17 +1787,15 @@
         </div>`;
     }
 
-    // Desktop (>900px) is the only viewport where the sidebar column and the
-    // header dropdown are ever both eligible to show at once, so it is the
-    // only place a JS-computed width matters — below 900px the stylesheet
-    // already hides .conv-col and shows .conv-trigger unconditionally.
+    // The conversation list now lives in the nav rail (railChatBlock(),
+    // desktop-only — the rail is display:none below 900px), so this column
+    // is just the thread; .chat-layout's own CSS still assumes two columns
+    // (250px 1fr), hence the inline override to one. Below 900px the
+    // stylesheet's own media query already collapses it the same way, but
+    // forcing it here too means this no longer depends on that cascade.
     const desktopWide = window.innerWidth > 900;
-    const layoutStyle = desktopWide
-      ? ` style="grid-template-columns:${state.chatListOpen ? '250px' : '130px'} 1fr;"`
-      : '';
 
-    return `<div class="chat-layout"${layoutStyle}>
-      ${chatConvList(convs, active)}
+    return `<div class="chat-layout" style="grid-template-columns:1fr;">
       <div class="chat-shell" style="min-width:0;">
         <div class="chat-top hair" style="min-width:0;">
           ${desktopWide ? '' : `<button class="mini-pill" data-act="chat-new" title="New chat"
@@ -1773,6 +1807,7 @@
           <div class="chat-status" style="flex-shrink:0;">
             <span class="live-dot"></span>${window.innerWidth > 480 ? '<span>Pokie is listening</span>' : ''}
           </div>
+          ${refreshBtn()}
         </div>
         ${state.chatListOpen && !desktopWide ? `<div class="conv-menu" style="min-width:0;">${chatConvListBody(convs)}</div>` : ''}
         ${roleFiltersRow(false)}
@@ -1790,41 +1825,73 @@
   };
 
   /* ================= data needed per screen ================= */
+  // Returns a promise that settles once everything this call kicked off has
+  // finished — reload/refresh/pull-to-refresh await it to know when to hide
+  // their spinner. Screens that need nothing new (their slots are already
+  // populated) resolve immediately, same as before this return value existed.
   function ensureData() {
+    const jobs = [];
     switch (state.screen) {
       case 'chat':
-        if (!slot('chat').data && !slot('chat').loading && !slot('chat').error) loadChat();
-        if (!slot('roleFilters').data && !slot('roleFilters').loading && !slot('roleFilters').error) loadRoleFilters();
+        if (!slot('chat').data && !slot('chat').loading && !slot('chat').error) jobs.push(loadChat());
+        if (!slot('roleFilters').data && !slot('roleFilters').loading && !slot('roleFilters').error) jobs.push(loadRoleFilters());
         break;
-      case 'overview': if (!slot('overview').data && !slot('overview').loading && !slot('overview').error) loadOverview(); break;
-      case 'jobs': if (!slot('jobs').data && !slot('jobs').loading && !slot('jobs').error) loadJobs(); break;
+      case 'overview': if (!slot('overview').data && !slot('overview').loading && !slot('overview').error) jobs.push(loadOverview()); break;
+      case 'jobs': if (!slot('jobs').data && !slot('jobs').loading && !slot('jobs').error) jobs.push(loadJobs()); break;
       case 'run':
-        if (!slot('sources').data && !slot('sources').loading && !slot('sources').error) loadSources();
+        if (!slot('sources').data && !slot('sources').loading && !slot('sources').error) jobs.push(loadSources());
         // The feed tells this screen whether a backlog is waiting; the status
         // endpoint tells it whether a run is already going (e.g. started
         // before a reload, or by the sweep tail).
-        if (!slot('jobs').data && !slot('jobs').loading && !slot('jobs').error) loadJobs();
+        if (!slot('jobs').data && !slot('jobs').loading && !slot('jobs').error) jobs.push(loadJobs());
         if (!slot('backlog').data && !slot('backlog').loading && !slot('backlog').error) {
           // A run started before a reload is still going on the server; pick
           // its progress back up rather than showing a frozen snapshot.
-          loadBacklog().then(() => {
+          jobs.push(loadBacklog().then(() => {
             const b = slot('backlog').data;
             if (b && b.running && !state.backlogPoll) pollBacklog();
-          });
+          }));
         }
         break;
-      case 'approve': if (!slot('reviews').data && !slot('reviews').loading && !slot('reviews').error) loadReviews(); break;
-      case 'applications': if (!slot('applications').data && !slot('applications').loading && !slot('applications').error) loadApplications(); break;
-      case 'memory': if (!slot('memory').data && !slot('memory').loading && !slot('memory').error) loadMemory(); break;
-      case 'sources': if (!slot('sources').data && !slot('sources').loading && !slot('sources').error) loadSources(); break;
-      case 'history': if (!slot('history').data && !slot('history').loading && !slot('history').error) loadHistory(); break;
+      case 'approve': if (!slot('reviews').data && !slot('reviews').loading && !slot('reviews').error) jobs.push(loadReviews()); break;
+      case 'applications': if (!slot('applications').data && !slot('applications').loading && !slot('applications').error) jobs.push(loadApplications()); break;
+      case 'memory': if (!slot('memory').data && !slot('memory').loading && !slot('memory').error) jobs.push(loadMemory()); break;
+      case 'sources': if (!slot('sources').data && !slot('sources').loading && !slot('sources').error) jobs.push(loadSources()); break;
+      case 'history': if (!slot('history').data && !slot('history').loading && !slot('history').error) jobs.push(loadHistory()); break;
       case 'vault':
-        if (!slot('vault').data && !slot('vault').loading && !slot('vault').error) loadVault();
-        if (!slot('roleFilters').data && !slot('roleFilters').loading && !slot('roleFilters').error) loadRoleFilters();
+        if (!slot('vault').data && !slot('vault').loading && !slot('vault').error) jobs.push(loadVault());
+        if (!slot('roleFilters').data && !slot('roleFilters').loading && !slot('roleFilters').error) jobs.push(loadRoleFilters());
         break;
-      case 'cvlab': if (!slot('cvVersions').data && !slot('cvVersions').loading && !slot('cvVersions').error) loadCvVersions(); break;
-      case 'settings': if (!slot('settings').data && !slot('settings').loading && !slot('settings').error) loadSettings(); break;
+      case 'cvlab': if (!slot('cvVersions').data && !slot('cvVersions').loading && !slot('cvVersions').error) jobs.push(loadCvVersions()); break;
+      case 'settings': if (!slot('settings').data && !slot('settings').loading && !slot('settings').error) jobs.push(loadSettings()); break;
     }
+    return Promise.all(jobs);
+  }
+
+  // Screens whose primary data does not live in a store slot named after the
+  // screen itself (loadX() always calls slot('run') would be wrong — 'run'
+  // spreads across sources/backlog/jobs/sweep) — everything else's loader
+  // writes straight into slot(<screen key>), so no entry is needed for those.
+  const SCREEN_SLOTS = { run: ['sources', 'backlog', 'jobs', 'sweep'] };
+  function slotsFor(screen) {
+    const base = SCREEN_SLOTS[screen] || [screen];
+    return (screen === 'chat' && state.chatConv) ? base.concat(['chat:' + state.chatConv]) : base;
+  }
+  function isScreenLoading(screen) {
+    return slotsFor(screen || state.screen).some(k => slot(k).loading);
+  }
+  // The one place both the Retry button and the new refresh control (desktop
+  // button + mobile pull-to-refresh) funnel through: drop the cached slot(s)
+  // so the next ensureData() genuinely refetches rather than re-rendering
+  // what's already in store, then render immediately so the screen's own
+  // loading state shows right away. Returns ensureData()'s promise so a
+  // caller can know when the refetch has actually settled.
+  function reloadScreen(screen) {
+    slotsFor(screen).forEach(k => delete store[k]);
+    delete store['overview'];
+    const p = ensureData();
+    render();
+    return p;
   }
 
   /* ================= render ================= */
@@ -1877,7 +1944,12 @@
   /* ================= actions ================= */
   const ACTIONS = {
     go: (el) => go(el.dataset.screen),
-    reload: (el) => { delete store[el.dataset.screen]; store['overview'] && delete store['overview']; ensureData(); render(); },
+    reload: (el) => { reloadScreen(el.dataset.screen); },
+    // Desktop's always-available refresh control (see pageHead()/jobs-head/
+    // chat-top). Same path as Retry and pull-to-refresh; a no-op while a
+    // fetch for this screen is already in flight rather than piling on a
+    // second one.
+    refresh: () => { if (!isScreenLoading()) reloadScreen(state.screen); },
     logout: () => { tokens.clear(); location.reload(); },
 
     /* ---- chat ---- */
@@ -2414,6 +2486,97 @@
     const screen = h || 'chat';
     if (screen !== state.screen) go(screen);
   });
+
+  /* ================= pull-to-refresh (#main, mobile) =================
+   * The app shell is fixed (html/body/.app all overflow:hidden at 100dvh) so
+   * only #main scrolls — the document itself never does, which means the
+   * browser's native pull-to-refresh can never fire. This reimplements the
+   * gesture by hand on #main: touchstart only arms it when already at the
+   * very top (scrollTop===0), touchmove tracks a downward drag and shows a
+   * small indicator past a threshold, touchend past that threshold refetches
+   * through the exact same reloadScreen() path as the desktop button and the
+   * Retry links. Anything that is not a clean top-of-scroll downward drag —
+   * scrolling that is already underway, an upward flick, a mostly-horizontal
+   * swipe, a second pull while one is already loading — falls straight
+   * through to native touch/scroll behaviour untouched.                   */
+  (function initPullToRefresh() {
+    const THRESHOLD = 70, MAX_PULL = 110;
+    let startX = null, startY = null, lastDy = 0, tracking = false, pulling = false;
+
+    function indicator() {
+      let el = document.getElementById('pk-ptr');
+      if (el) return el;
+      el = document.createElement('div');
+      el.id = 'pk-ptr';
+      el.setAttribute('aria-hidden', 'true');
+      el.innerHTML = '<span class="spinner" style="width:18px;height:18px;border-width:2px;"></span>';
+      el.style.cssText = 'position:fixed;left:50%;top:0;z-index:60;width:36px;height:36px;'
+        + 'border-radius:50%;background:var(--panel);border:1px solid var(--border);'
+        + 'display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;'
+        + 'transform:translate(-50%,-48px);'
+        + (REDUCE_MOTION ? '' : 'transition:transform .2s ease,opacity .2s ease;');
+      document.body.appendChild(el);
+      return el;
+    }
+    function setPull(dy, ready) {
+      const el = indicator();
+      const clamped = Math.min(MAX_PULL, dy);
+      el.style.transition = 'none'; // follow the finger exactly while dragging
+      el.style.opacity = clamped > 4 ? '1' : '0';
+      el.style.transform = `translate(-50%, ${-48 + Math.min(64, clamped)}px)`;
+      const spin = el.querySelector('.spinner');
+      if (spin) spin.style.borderTopColor = ready ? 'var(--pink)' : 'var(--blue)';
+    }
+    function resting(offset) {
+      const el = indicator();
+      el.style.transition = REDUCE_MOTION ? 'none' : 'transform .2s ease,opacity .2s ease';
+      el.style.opacity = offset ? '1' : '0';
+      el.style.transform = `translate(-50%, ${offset}px)`;
+    }
+
+    document.addEventListener('touchstart', (e) => {
+      const main = mainEl();
+      if (!main || !main.contains(e.target)) return;
+      if (main.scrollTop > 0 || isScreenLoading()) { tracking = false; return; }
+      const t = e.touches[0];
+      startX = t.clientX; startY = t.clientY; lastDy = 0;
+      tracking = true; pulling = false;
+    }, { passive: true });
+
+    document.addEventListener('touchmove', (e) => {
+      if (!tracking) return;
+      const main = mainEl();
+      if (!main || main.scrollTop > 0) { tracking = false; pulling = false; resting(0); return; }
+      const t = e.touches[0];
+      const dy = t.clientY - startY, dx = t.clientX - startX;
+      if (!pulling && Math.abs(dx) > Math.abs(dy)) { tracking = false; return; } // horizontal swipe — not ours
+      if (dy <= 0) { pulling = false; resting(0); return; }
+      pulling = true;
+      lastDy = dy;
+      // Own the gesture once it's a real downward pull at the top of the
+      // scroll area, so the browser doesn't also try to rubber-band it.
+      if (e.cancelable) e.preventDefault();
+      setPull(dy, dy >= THRESHOLD);
+    }, { passive: false });
+
+    async function finishPull() {
+      if (isScreenLoading()) { resting(14); }
+      else resting(0);
+      try { await reloadScreen(state.screen); }
+      finally { resting(0); }
+    }
+
+    document.addEventListener('touchend', () => {
+      if (!tracking) return;
+      const shouldRefresh = pulling && lastDy >= THRESHOLD && !isScreenLoading();
+      tracking = false; pulling = false; lastDy = 0;
+      if (shouldRefresh) finishPull();
+      else resting(0);
+    });
+    document.addEventListener('touchcancel', () => {
+      tracking = false; pulling = false; lastDy = 0; resting(0);
+    });
+  })();
 
   /* ================= boot ================= */
   async function boot() {
