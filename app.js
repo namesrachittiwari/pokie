@@ -467,7 +467,78 @@
     render();
   }
   const loadBacklog = () => load('backlog', '/jobs/score_backlog/status');
-  const loadHistory = () => load('history', '/activity/log?limit=60', d => d.days || []);
+  // History is the audit trail — "everything Pokie did" — so it has to be
+  // fully reachable, not just its first page. The endpoint has always returned
+  // next_cursor; the client used to throw it away, which silently capped the
+  // log at 60 entries and made older activity look like it never happened.
+  //
+  // Days are merged rather than concatenated: a page boundary can fall in the
+  // middle of a day, and appending blindly would render that date twice with
+  // its entries split across two cards.
+  async function loadHistory(more) {
+    const s = slot('history');
+    if (s.loading) return;
+    const cursor = more ? (s.data && s.data.next_cursor) : null;
+    if (more && !cursor) return;
+    s.loading = true; s.error = null;
+    if (!more) s.data = null;
+    render();
+    const res = await api('/activity/log?limit=60'
+      + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+    s.loading = false;
+    if (!res.ok) {
+      // A failed "load more" must not destroy the pages already on screen.
+      if (!more) { s.error = res.error; s.data = null; }
+      else toast('Could not load more history: ' + res.error);
+      render(); return;
+    }
+    const incoming = res.data.days || [];
+    const days = more && s.data ? s.data.days.slice() : [];
+    incoming.forEach(day => {
+      const existing = days.find(d => d.date === day.date);
+      if (existing) existing.items = existing.items.concat(day.items);
+      else days.push(day);
+    });
+    s.data = { days, next_cursor: res.data.next_cursor || null };
+    render();
+  }
+
+  // The step-by-step narration of a run. Deliberately does NOT set slot.error
+  // on failure: the steps are commentary on the sweep, and losing them must
+  // not paint an error banner over a sweep that is running perfectly well —
+  // the step list just stays as it was.
+  // Which sweep this screen is following, remembered across reloads.
+  //
+  // A hunt outlives the tab: you start one, lock your phone, and come back
+  // later to see what it did. Keeping the id only in memory meant the run
+  // screen forgot the sweep on every reload and showed "No sweep running"
+  // while the sweep was still going on the server — with the narration sitting
+  // in the database, unreachable.
+  const SWEEP_KEY = 'pokie.sweepId';
+  function rememberSweep(id) {
+    state.sweepId = id;
+    try { localStorage.setItem(SWEEP_KEY, String(id)); } catch (e) { /* private mode */ }
+  }
+  function recallSweep() {
+    if (state.sweepId) return state.sweepId;
+    try { state.sweepId = localStorage.getItem(SWEEP_KEY) || null; } catch (e) { state.sweepId = null; }
+    return state.sweepId;
+  }
+  function forgetSweep() {
+    state.sweepId = null;
+    clearInterval(state.sweepPoll); state.sweepPoll = null;
+    delete store['sweep']; delete store['narration'];
+    try { localStorage.removeItem(SWEEP_KEY); } catch (e) { /* private mode */ }
+  }
+
+  // Slot key is 'narration', not 'run': 'run' is a SCREEN whose data already
+  // spreads across sources/backlog/jobs/sweep (see SCREEN_SLOTS), so a slot by
+  // that name would be cleared and reasoned about as if it were the screen.
+  async function loadRun(runId) {
+    const res = await api('/runs/' + encodeURIComponent(runId));
+    if (!res.ok) return;
+    slot('narration').data = res.data;
+  }
 
   async function loadMemory() {
     const s = slot('memory');
@@ -875,6 +946,58 @@
   const tag = (label, colour) =>
     `<span class="tag" style="color:${colour};border-color:${colour}33;background:${colour}14">${esc(label)}</span>`;
 
+  // "What is it doing right now" — the step-by-step narration behind a run.
+  //
+  // Every line here is a row the backend wrote as the work happened
+  // (src/run_narration.py); this function renders them and adds nothing. A
+  // sweep whose narration never opened renders nothing at all rather than an
+  // invented plan, because the per-source results card below already tells the
+  // real story and two disagreeing accounts would be worse than one.
+  // The thought is the sentence ("linkedin did not answer: session logged
+  // out"); the detail is the short tag the same write recorded ("session
+  // logged out"). Rendering both put the reason on screen twice, so the row
+  // shows the thought and keeps detail only as the fallback for a step that
+  // recorded no thought. Both stay in the API — other run kinds may want them
+  // apart.
+  const STEP_MARK = { done: '✓', failed: '✕', running: '◐', pending: '○' };
+  const STEP_COLOUR = () => ({ done: GREEN, failed: PINK, running: BLUE, pending: GREY });
+
+  function narrationCard(sweep) {
+    const run = slot('narration').data;
+    // Only narrate THIS sweep. A stale run left in the slot from the previous
+    // sweep would otherwise render under the new one's header, which reads as
+    // Pokie reporting work it is not doing.
+    if (!run || !sweep.run_id || String(run.id) !== String(sweep.run_id)) return '';
+    const steps = run.steps || [];
+    if (!steps.length) return '';
+    const colours = STEP_COLOUR();
+    const live = run.status === 'running' || run.status === 'queued';
+    return `<div class="eyebrow" style="margin-top:8px">What Pokie is doing</div>
+      ${run.current_thought ? `<div class="think-line">
+        ${live ? '<span class="spinner sm"></span>' : `<span class="mk" style="color:${GREY}">·</span>`}
+        <span>${esc(run.current_thought)}</span>
+      </div>` : ''}
+      <div class="steps-card narration-card">
+        ${steps.map(s => `<div class="step-row">
+          <span class="mk" style="color:${colours[s.status] || GREY}">${STEP_MARK[s.status] || '○'}</span>
+          <span>
+            <span class="tx">${esc(s.label)}</span>
+            ${(s.thought || s.detail) ? `<span class="dt">${esc(s.thought || s.detail)}</span>` : ''}
+          </span>
+          <span class="du">${s.duration_ms != null && s.duration_ms >= 50 ? esc(fmtMs(s.duration_ms)) : ''}</span>
+        </div>`).join('')}
+      </div>`;
+  }
+
+  // Durations are read at a glance, not measured: sub-second work says "0.4s"
+  // rather than "412ms", and a long step says "1m 20s" rather than "80.3s".
+  function fmtMs(ms) {
+    if (ms < 1000) return (ms / 1000).toFixed(1) + 's';
+    const s = Math.round(ms / 1000);
+    if (s < 60) return s + 's';
+    return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  }
+
   // One scoring pass, in the same visual language as the per-source rows.
   // Every count is the backend's own: 'failed' means the LLM call failed and
   // the job stayed honestly unscored — nothing was invented for it.
@@ -947,6 +1070,7 @@
           </div>
           <div class="counter"><span class="v">${(sw.data.results || []).reduce((n, r) => n + (r.found || 0), 0)}</span></div>
         </div>
+        ${narrationCard(sw.data)}
         ${(sw.data.results || []).length ? `<div class="steps-card">
           ${sw.data.results.map(r => `<div class="step-row">
             <span class="mk" style="color:${r.status === 'completed' ? GREEN : r.status === 'failed' ? PINK : BLUE}">${r.status === 'completed' ? '✓' : r.status === 'failed' ? '✕' : '•'}</span>
@@ -1245,7 +1369,8 @@
     const s = slot('history');
     if (s.loading && !s.data) return `<div class="pad">${loadingHTML('history')}</div>`;
     if (s.error) return `<div class="pad">${errorHTML(s.error)}</div>`;
-    const days = s.data || [];
+    const days = (s.data && s.data.days) || [];
+    const more = !!(s.data && s.data.next_cursor);
     return `<div class="pad">
       ${pageHead('History', 'Everything Pokie did, newest first.')}
       ${days.length ? days.map(d => `
@@ -1259,6 +1384,10 @@
           </div>`).join('')}
         </div>`).join('')
         : emptyHTML('Nothing yet', 'Pokie logs every action it takes here.')}
+      ${more ? `<div style="display:flex;justify-content:center;padding:20px 0">
+        <button class="pill outline" data-act="history-more" ${s.loading ? 'disabled' : ''}>
+          ${s.loading ? 'Loading…' : 'Load older activity'}</button>
+      </div>` : ''}
     </div>`;
   }
 
@@ -1884,6 +2013,10 @@
             if (b && b.running && !state.backlogPoll) pollBacklog();
           }));
         }
+        // Same for the sweep: the id is remembered across reloads, so pick the
+        // last one back up and show its steps. pollSweep stops itself once the
+        // sweep is terminal, so a finished sweep costs exactly one fetch.
+        if (!slot('sweep').data && !state.sweepPoll && recallSweep()) jobs.push(pollSweep());
         break;
       case 'approve': if (!slot('reviews').data && !slot('reviews').loading && !slot('reviews').error) jobs.push(loadReviews()); break;
       case 'applications': if (!slot('applications').data && !slot('applications').loading && !slot('applications').error) jobs.push(loadApplications()); break;
@@ -1904,7 +2037,7 @@
   // screen itself (loadX() always calls slot('run') would be wrong — 'run'
   // spreads across sources/backlog/jobs/sweep) — everything else's loader
   // writes straight into slot(<screen key>), so no entry is needed for those.
-  const SCREEN_SLOTS = { run: ['sources', 'backlog', 'jobs', 'sweep'] };
+  const SCREEN_SLOTS = { run: ['sources', 'backlog', 'jobs', 'sweep', 'narration'] };
   function slotsFor(screen) {
     const base = SCREEN_SLOTS[screen] || [screen];
     return (screen === 'chat' && state.chatConv) ? base.concat(['chat:' + state.chatConv]) : base;
@@ -1984,7 +2117,11 @@
     // fetch for this screen is already in flight rather than piling on a
     // second one.
     refresh: () => { if (!isScreenLoading()) reloadScreen(state.screen); },
-    logout: () => { tokens.clear(); location.reload(); },
+    // forgetSweep before reload: the remembered sweep id belongs to the account
+    // that just signed out, and the next account's run screen must not open on
+    // someone else's hunt (it would 404 and clear itself, but only after
+    // showing it).
+    logout: () => { forgetSweep(); tokens.clear(); location.reload(); },
 
     /* ---- chat ---- */
     'chat-new': async () => {
@@ -2098,7 +2235,7 @@
     'sweep-now': async () => {
       const res = await api('/sweeps/trigger', { method: 'POST', body: JSON.stringify({}) });
       if (!res.ok) return toast('Could not start a sweep: ' + res.error);
-      state.sweepId = res.data.sweep_id;
+      rememberSweep(res.data.sweep_id);
       slot('sweep').data = res.data;
       toast('Sweep started.');
       go('run');
@@ -2115,6 +2252,7 @@
       go('run');
       pollBacklog();
     },
+    'history-more': () => loadHistory(true),
     'answer-escalation': async (el) => {
       const input = $('#esc-in-' + el.dataset.id);
       const answer = input ? input.value.trim() : '';
@@ -2486,12 +2624,33 @@
   async function pollSweep() {
     clearInterval(state.sweepPoll);
     if (!state.sweepId) return;
-    let announced = false, waitedForScoring = 0;
+    // `resumed` distinguishes "I started this sweep and am watching it" from
+    // "this is the sweep this browser last saw". A sweep that was ALREADY
+    // finished when we picked it up is not news, so it must not toast
+    // "Sweep completed." again on every reload — that reads as a fresh sweep
+    // finishing and sends you looking for jobs that arrived hours ago.
+    let announced = false, waitedForScoring = 0, first = true;
     const tick = async () => {
       const res = await api('/sweeps/' + encodeURIComponent(state.sweepId) + '/status');
       const s = slot('sweep');
-      if (!res.ok) { s.error = res.error; clearInterval(state.sweepPoll); render(); return; }
+      if (!res.ok) {
+        // A remembered id that no longer resolves (different account, pruned
+        // row) is not an error worth a banner — forget it and show the empty
+        // state, which is the truth.
+        if (first) { forgetSweep(); render(); return; }
+        s.error = res.error; clearInterval(state.sweepPoll); render(); return;
+      }
+      if (first && (res.data.status === 'completed' || res.data.status === 'failed')) {
+        announced = true;
+      }
+      first = false;
       s.data = res.data; s.error = null;
+      // The narration run this sweep writes its steps to. Fetched on the same
+      // tick so the step list and the per-source results can never disagree by
+      // a poll interval. A sweep with no run_id (narration never opened at all)
+      // simply shows no steps — the results card below still renders, so the
+      // screen is never blank.
+      if (res.data.run_id) await loadRun(res.data.run_id);
       const terminal = res.data.status === 'completed' || res.data.status === 'failed';
       if (terminal && !announced) {
         announced = true;
@@ -2511,7 +2670,13 @@
       if (state.screen === 'run') render();
     };
     await tick();
-    state.sweepPoll = setInterval(tick, 2500);
+    // Only arm the interval if that first tick left work to watch. Resuming a
+    // sweep that finished hours ago should cost one request, not a timer that
+    // ticks until the tab closes.
+    const settled = slot('sweep').data
+      && (slot('sweep').data.status === 'completed' || slot('sweep').data.status === 'failed')
+      && slot('sweep').data.scoring;
+    if (state.sweepId && !settled) state.sweepPoll = setInterval(tick, 2500);
   }
 
   // Backlog scoring has no WS event (it writes the same job rows the feed

@@ -282,6 +282,17 @@ button:focus-visible, input:focus-visible { outline:2px solid var(--pink); outli
 .step-row .tx { font-size:16px; }
 .step-row .dt { font-size:13px; color:var(--t3); line-height:1.5; }
 .step-row .du { font-size:13px; color:var(--t3); font-variant-numeric:tabular-nums; }
+/* .tx and .dt are sibling spans in one grid cell, so without this they run
+   together on one line with no separator — the Sources card has been rendering
+   "ats_apiHealthy" and the per-source results "linkedincompleted". Narration
+   rows made it obvious by putting a whole sentence in .dt, but the defect is
+   older and applies to every step-row, which is why the rule is not scoped to
+   the narration card. */
+.step-row .dt { display:block; }
+/* The run's live current thought, above its step list. */
+.think-line { display:flex; align-items:center; gap:12px; padding:2px 4px 10px;
+  font-size:14px; color:var(--t2); line-height:1.5; }
+.spinner.sm { width:15px; height:15px; border-width:2px; }
 .interject { display:flex; align-items:center; gap:12px; background:var(--panel); border:1px solid rgba(255,255,255,.12); border-radius:999px; padding:8px 8px 8px 22px; }
 .interject .dot { width:7px; height:7px; border-radius:50%; background:var(--blue); animation:pk-pulse 1.6s ease-in-out infinite; flex-shrink:0; }
 .interject input { flex:1; font-size:15px; padding:11px 0; min-width:0; }
